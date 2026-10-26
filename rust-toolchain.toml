@@ -1,0 +1,9 @@
+# Toolchain pin for osza-netmon (task T-000).
+# A specific stable version is pinned (never the floating "stable"
+# channel) so that builds, rustfmt and clippy behave identically
+# everywhere. Keep in sync with docs/reports/T-000/execution-01.md when
+# the pin changes.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

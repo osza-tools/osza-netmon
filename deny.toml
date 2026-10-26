@@ -1,0 +1,55 @@
+# cargo-deny configuration for osza-netmon (task T-000; plan §9.1 and
+# task card §5.5). Validated with cargo-deny 0.20.2 against the real
+# dependency tree; see docs/reports/T-000/execution-01.md.
+
+[graph]
+all-features = true
+
+[licenses]
+version = 2
+# Only GPL-3.0-compatible licenses are allowed. The project itself is
+# GPL-3.0-only, so it heads the list; every license the real dependency
+# tree needs is listed explicitly and anything else fails the check
+# (cargo-deny >= 0.20: unlisted licenses are rejected when an allow list
+# is present; the former `copyleft`/`unlicensed` keys were removed).
+allow = [
+    "GPL-3.0-only",
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+# `*` requirements are forbidden.
+wildcards = "deny"
+# Duplicate versions are tolerated but stay visible.
+multiple-versions = "warn"
+# Crates prohibited by plan §9.1 ("Prohibited in MVP") and task card §5.5.
+deny = [
+    { name = "tokio" },
+    { name = "async-std" },
+    { name = "reqwest" },
+    { name = "hyper" },
+    { name = "openssl" },
+    { name = "openssl-sys" },
+    { name = "native-tls" },
+    { name = "pcap" },
+]
+
+[advisories]
+version = 2
+# Vulnerabilities, unmaintained and yanked crates are hard errors.
+# Exceptions must be justified in the task report.
+unmaintained = "all"
+yanked = "deny"
+
+[sources]
+# Only crates.io is an allowed source; no git dependencies.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
