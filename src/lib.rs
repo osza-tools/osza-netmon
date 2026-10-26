@@ -79,7 +79,6 @@ where
     }
 }
 
-
 // === GATE PROOF (throwaway) ===
 /// Gate-proof (c): `println!` in library code. The
 /// `clippy::print_stdout = "deny"` lint (plan SR-03) must reject this
