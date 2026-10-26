@@ -79,15 +79,6 @@ where
     }
 }
 
-// === GATE PROOF (throwaway) ===
-/// Gate-proof (c): `println!` in library code. The
-/// `clippy::print_stdout = "deny"` lint (plan SR-03) must reject this
-/// commit.
-pub fn gate_proof_println() {
-    println!("gate proof: stdout from library code");
-}
-// === END GATE PROOF ===
-
 #[cfg(test)]
 mod tests {
     use super::*;
