@@ -79,6 +79,16 @@ where
     }
 }
 
+// === GATE PROOF (throwaway) ===
+/// Gate-proof (b): `.unwrap()` in non-test code. The
+/// `clippy::unwrap_used = "deny"` lint (plan SR-02) must reject this
+/// commit.
+pub fn gate_proof_unwrap() -> u8 {
+    let items: [u8; 1] = [7];
+    items.first().copied().unwrap()
+}
+// === END GATE PROOF ===
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,9 +158,3 @@ mod tests {
     }
 }
 
-// === GATE PROOF (throwaway) ===
-/// Gate-proof (a): an `unsafe` block. The `unsafe_code = "forbid"` lint
-/// (plan SR-01) must reject this commit.
-pub fn gate_proof_unsafe() -> u8 {
-    unsafe { 0 }
-}
