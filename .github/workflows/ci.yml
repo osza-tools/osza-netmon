@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "5"
+  RUSTUP_MAX_RETRIES: "5"
+
+jobs:
+  gates:
+    name: fmt / clippy / test / doc / SPDX
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust toolchain (from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      # cargo-fmt does not accept --locked (it performs no dependency
+      # resolution); every command below that resolves dependencies uses it.
+      - name: cargo fmt --check
+        run: cargo fmt --check
+      - name: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: cargo test --all-features
+        run: cargo test --locked --all-features
+      - name: cargo doc --no-deps (warnings denied)
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
+      - name: SPDX header check
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS= read -r -d '' f; do
+            if ! head -n 1 "$f" | grep -q '^// SPDX-License-Identifier: GPL-3.0-only$'; then
+              echo "::error file=${f}::missing SPDX header"
+              status=1
+            fi
+          done < <(find . -name '*.rs' -not -path './target/*' -print0)
+          exit "$status"
+
+  supply-chain:
+    name: cargo audit / cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust toolchain (from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          cache: false
+      # cargo-audit and cargo-deny are installed from their official
+      # releases at pinned versions, with the SHA-256 of each tarball
+      # verified before extraction (T-000 report documents the choice).
+      - name: Install cargo-audit 0.22.2 (pinned, official RustSec release)
+        run: |
+          set -euo pipefail
+          curl -sSL -o /tmp/cargo-audit.tgz \
+            "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz"
+          echo "7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428  /tmp/cargo-audit.tgz" | sha256sum --check -
+          tar -xzf /tmp/cargo-audit.tgz -C "$HOME/.cargo/bin" --strip-components=1 --wildcards '*/cargo-audit'
+      - name: Install cargo-deny 0.20.2 (pinned, official EmbarkStudios release)
+        run: |
+          set -euo pipefail
+          curl -sSL -o /tmp/cargo-deny.tar.gz \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz"
+          echo "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  /tmp/cargo-deny.tar.gz" | sha256sum --check -
+          tar -xzf /tmp/cargo-deny.tar.gz -C "$HOME/.cargo/bin" --strip-components=1 --wildcards '*/cargo-deny'
+      - name: cargo audit
+        run: cargo audit
+      - name: cargo deny check
+        run: cargo deny check
+
+  msrv:
+    name: MSRV build (rust-version from Cargo.toml)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Read MSRV from Cargo.toml
+        id: msrv
+        run: |
+          set -euo pipefail
+          msrv="$(sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml)"
+          echo "msrv=${msrv}" >> "$GITHUB_OUTPUT"
+          echo "MSRV: ${msrv}"
+      - name: Install MSRV toolchain (overrides rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          toolchain: ${{ steps.msrv.outputs.msrv }}
+          cache: false
+      - name: cargo build --locked at MSRV
+        run: cargo build --locked
