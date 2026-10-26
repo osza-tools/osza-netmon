@@ -147,3 +147,10 @@ mod tests {
         );
     }
 }
+
+// === GATE PROOF (throwaway) ===
+/// Gate-proof (a): an `unsafe` block. The `unsafe_code = "forbid"` lint
+/// (plan SR-01) must reject this commit.
+pub fn gate_proof_unsafe() -> u8 {
+    unsafe { 0 }
+}
