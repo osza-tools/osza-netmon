@@ -232,11 +232,6 @@ fn packed_octet(packed: u64, index: u32) -> u8 {
     ((packed >> (40 - 8 * index)) & 0xff) as u8
 }
 
-#[allow(dead_code)]
-fn violation_println() {
-    println!("violation");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
