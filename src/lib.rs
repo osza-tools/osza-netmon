@@ -5,6 +5,11 @@
 //! Task T-000 (repository bootstrap) puts only the application identity
 //! constants and the command-line argument classification here. Product
 //! behavior arrives with the later tasks in `plan.md` §13.
+//!
+//! Task T-002 adds the domain model under [`model`]: the boundary-validated
+//! core primitives of `plan.md` §5.2–5.3.
+
+pub mod model;
 
 use std::ffi::OsString;
 
