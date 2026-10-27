@@ -1,5 +1,6 @@
 # AGENTS.md — rules for agents working on osza-netmon
 Authority: plan.md. Read your task card and the plan sections it cites before coding.
+Decision log: docs/adr/ (ADR-001…016, transcribed from plan.md §4 by T-001; index at docs/adr/index.md). Consult the relevant ADR before changing an area it governs.
 1. Do exactly what the task card says. Out-of-scope ideas go to "Suggested follow-ups".
 2. Stop and write a Plan Question when the plan is ambiguous or conflicts with the card.
 3. No new dependencies without Manager approval. No `unsafe`. No println!/eprintln! outside main.rs pre-init/post-restore.
