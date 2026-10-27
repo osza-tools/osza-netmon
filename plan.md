@@ -3,11 +3,13 @@
 | | |
 |---|---|
 | **Document** | `plan.md` — the single source of truth for this project |
-| **Plan version** | 1.0.0 |
+| **Plan version** | 1.1.0 |
 | **Targets product version** | 0.1.0 (MVP) |
 | **Status** | Approved for execution — Phase 0 may start |
 | **Ecosystem** | osza-tools |
-| **Working product name** | `osza-netmon` (**PROVISIONAL**, see ADR-001) |
+| **Product name** | `osza-netmon` (confirmed, ADR-001) |
+| **Repository** | https://github.com/osza-tools/osza-netmon |
+| **License** | GPL-3.0 (ADR-014; variant to confirm, O-7) |
 | **Stack** | Rust · Terminal UI (ratatui) · Linux |
 | **Roles** | Owner (human, relays orders and reports) · Manager (lead agent: plan, task cards, report review, gate decisions) · Executor agent(s) · Reviewer agent(s) |
 
@@ -137,7 +139,7 @@ Decisions are recorded as ADRs in `docs/adr/` (task T-001). Status: **Accepted**
 
 | ADR | Title | Status |
 |---|---|---|
-| 001 | Product naming | Provisional |
+| 001 | Product naming | Accepted |
 | 002 | Status vocabulary (Recent / Idle) | Accepted |
 | 003 | Hostname resolution policy | Accepted |
 | 004 | Authorization notice policy | Accepted |
@@ -150,12 +152,12 @@ Decisions are recorded as ADRs in `docs/adr/` (task T-001). Status: **Accepted**
 | 011 | Probe strategy (passes, rate, sender IP, unicast refresh) | Pending (T-105), defaults below |
 | 012 | Concurrency: std threads, no async runtime | Accepted |
 | 013 | Persistence: none, except the notice acknowledgment | Accepted |
-| 014 | Project license | Open (owner) |
+| 014 | Project license | Accepted (variant to confirm, O-7) |
 | 015 | DNS PTR client implementation | Pending (T-203) |
-| 016 | CI provider (GitHub Actions assumed) | Open (owner) |
+| 016 | CI provider: GitHub Actions | Accepted |
 
-### ADR-001 Naming — Provisional
-The source brief mixes `osza-tools` and `veex-tools`. Working names: ecosystem `osza-tools`; crate and binary `osza-netmon`; display name "osza Network Monitor". The name MUST live in exactly one place in code (`pub const APP_NAME`/`DISPLAY_NAME`) plus `Cargo.toml`, so a rename is a one-commit change. The Owner confirms or replaces it before T-405 (packaging). No release artifact may carry the name until confirmed.
+### ADR-001 Naming — Accepted
+The source brief mixes `osza-tools` and `veex-tools`. Names: ecosystem `osza-tools`; crate and binary `osza-netmon`; display name "osza Network Monitor". The name MUST live in exactly one place in code (`pub const APP_NAME`/`DISPLAY_NAME`) plus `Cargo.toml`, so a rename is a one-commit change. The Owner confirmed the name and created the repository at https://github.com/osza-tools/osza-netmon.
 
 ### ADR-002 Status vocabulary — Accepted
 The Linux kernel uses `STALE` for a different concept. To avoid confusion in code, docs and UI we use **Recent** and **Idle**. "Stale" MUST NOT appear in our code identifiers or UI. Property-level absence uses `Unknown` / `Unavailable` (§5.2).
@@ -211,6 +213,16 @@ Only cycles with outcome `Complete` age devices; `Partial`, `Failed` and `Cancel
 ### ADR-012 / 013
 - **012:** `std::thread` + bounded channels. No tokio or other async runtime in the MVP.
 - **013:** In-memory state per session. No config file in the MVP; options come from CLI flags. The notice acknowledgment is the sole persisted item.
+
+### ADR-014 License — Accepted
+The Owner chose **GPL-3.0**. Until the Owner states otherwise (O-7) the SPDX identifier is `GPL-3.0-only` (the literal reading); `GPL-3.0-or-later` is the alternative. Consequences:
+- The repository carries a verbatim `LICENSE` file (text from https://www.gnu.org/licenses/gpl-3.0.txt — never paraphrased or reproduced from memory), `license = "GPL-3.0-only"` in `Cargo.toml`, and every `.rs` file starts with `// SPDX-License-Identifier: GPL-3.0-only`. CI enforces the header.
+- The `deny.toml` license allowlist contains only licenses compatible with GPL-3.0 (for example MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, Zlib, Unicode-3.0). Apache-2.0 is compatible with GPLv3. Any other license needs a Plan Question.
+- The IEEE-derived vendor data is data, not our code; its source, terms and attribution are recorded in `data/oui/SOURCE.md` (T-202).
+- `publish = false` stays in `Cargo.toml` until the Owner decides to publish on crates.io.
+
+### ADR-016 CI — Accepted
+GitHub Actions on the repository above. Every action is pinned by full commit SHA; workflows use `permissions: contents: read` unless a job needs more. The netns job uses `sudo` on a GitHub-hosted Ubuntu runner; whether it works as expected, including `tc netem` availability, is verified in T-106.
 
 ---
 
@@ -621,7 +633,7 @@ Cyan/blue = selection and active controls · Green = Recent · Yellow = Idle, in
 | Component | Scanner with a fake `ArpTransport` (pacing, passes, solicited-only, cancel, outcomes); app `update()` scenario scripts | in-memory fakes |
 | UI | Rendering at several sizes (80×24, 100×30, 120×40, tiny), states (empty, scanning, errors, read-only, many devices), keyboard and mouse flows, resize, terminal restore | ratatui `TestBackend` + `insta` snapshots |
 | Integration | Real raw-socket discovery inside Linux network namespaces with veth pairs | `ip netns`, scripted; see §11.2 |
-| Manual acceptance | Real wired and Wi-Fi networks you are authorized to test | `docs/test-matrix.md` (Appendix D) |
+| Manual acceptance | The Owner's real network (client-isolated Wi-Fi: the limited-visibility case) plus any additional authorized networks that become available | `docs/test-matrix.md` (Appendix D) |
 
 ### 11.2 Network namespace scenarios (T-106)
 The kernel answers ARP for any address configured on the peer interface, so many "devices" are just addresses in a peer namespace.
@@ -632,6 +644,8 @@ The kernel answers ARP for any address configured on the peer interface, so many
 - **S5** hostile frames (helper tool): unsolicited replies, malformed lengths, multicast sender MAC, out-of-scope sender IP, flood → rejected; registry cap holds.
 - **S6** egress assertion: captured traffic contains only ARP requests (+ allowed DNS PTR) — SR-07.
 - **S7** no privilege → read-only mode with correct message; after privileged start, `CapEff`/`CapPrm` are zero — SR-06.
+- **S8** impairment profiles P0–P3 (Appendix D) applied to S1/S2: recall per cycle is measured and compared with the G-1 thresholds. Loss, delay and jitter use `tc netem` where the kernel module is available; otherwise the helper responder drops or delays replies itself.
+- **S9** "sleepy hosts": addresses served by a helper responder (not configured on the kernel) that ignores the first N requests, answers only a fraction, or answers late, emulating power-save Wi-Fi clients. Reported, not gated.
 CI may need `sudo`/unprivileged user namespaces for these; they run behind `OSZA_NETNS_TESTS=1` and in a dedicated CI job.
 
 ### 11.3 Engineering gates (every change)
@@ -675,7 +689,7 @@ Phase 4  Reliability, hardening, packaging, acceptance ──► G-4 = MVP 0.1.0
 | T-101, T-102, T-103 | T-002 | each other, T-202, T-203 |
 | T-104 | T-101, T-103 | T-202, T-203 |
 | T-106 | T-104 | T-202, T-203 |
-| T-105 | T-102, T-104 (T-106 for synthetic scenarios) | T-202, T-203 |
+| T-105 | T-102, T-104, T-106 | T-202, T-203 |
 | **G-1** | T-101…T-106 | |
 | T-201 | G-1, T-002 | T-202, T-203 |
 | T-202, T-203 | T-002 (T-203 also needs T-101 for scope) | T-201 |
@@ -696,11 +710,11 @@ Phase 4  Reliability, hardening, packaging, acceptance ──► G-4 = MVP 0.1.0
 ### 12.2 Gates (Manager decides; each requires the reports and reviews of its tasks)
 | Gate | Pass criteria |
 |---|---|
-| **G-0** | Repo builds, CI gates green, lints in force, ADRs 001–008, 012, 013 recorded, core primitives tested including sanitization. |
-| **G-1** | Discovery works without the TUI on authorized test networks and in netns. **Success metric:** ≥ 95% of known devices discovered within 3 cycles on each *reference* network (wired /24; home Wi-Fi without client isolation). **Stop/adjust trigger:** < 80% on a reference network after tuning (ADR-011 options exhausted) → Manager escalates to the Owner with options (rely more on neighbor data, change messaging, or revise scope). Isolated/guest Wi-Fi with near-zero results is **not** a failure; it must be reported and the UX must explain it. ADR-009/010/011 decided. Permission model verified (SR-06). Limitation catalog written. |
+| **G-0** | Repo builds, CI gates green, lints in force, ADRs 001–008, 012, 013, 014, 016 recorded, core primitives tested including sanitization. |
+| **G-1** | Discovery works without the TUI in network namespaces and on the Owner's real (client-isolated) network. **Validation environment (Owner decision, v1.1.0):** the Owner's real Wi-Fi isolates clients and cannot provide ground truth, so recall is measured on **synthetic networks** (T-106) under the impairment profiles of Appendix D. **Success metric:** ≥ 95% recall within 3 cycles on profiles P0–P2 for scenarios S1, S2 and S4 (S9 "sleepy hosts" is reported separately with its observed recall). **Stop/adjust trigger:** < 95% on P0–P2 after tuning (ADR-011 options exhausted) → Manager adjusts the strategy or escalates to the Owner. On the Owner's isolated network near-zero visibility is **not** a failure: the run must complete cleanly, the neighbor-table path and the honest limited-visibility UX are verified, and the observation is recorded. **Declared gap:** behavior on real wired LANs and non-isolated Wi-Fi is not validated by the project (R-15); this is stated in the PoC report and in `docs/limitations.md`. ADR-009/010/011 decided. Permission model verified (SR-06). Limitation catalog written. |
 | **G-2** | Headless app core passes scenario tests driving discovery fakes and the real netns scanner; registry invariants proven; vendor DB and hostname enrichment verified; NFR-03 satisfied in headless benchmarks. |
 | **G-3** | A person can: notice → scope → discover → browse → details → refresh → quit, with keyboard and mouse; snapshots reviewed; terminal restore verified; no blocking during scans. |
-| **G-4** | All AC-01…AC-17 met with evidence (§19); NFRs measured; security hardening complete; docs complete; manual acceptance campaign signed by the Owner; name and license confirmed. |
+| **G-4** | All AC-01…AC-17 met with evidence (§19); NFRs measured; security hardening complete; docs complete, including the validation-scope statement in `docs/limitations.md`; acceptance campaign (Appendix D) signed by the Owner. |
 
 ---
 
@@ -712,7 +726,7 @@ Authoritative scope summaries. The Manager issues a full task card (Appendix A) 
 
 **T-000 Repository bootstrap** · M · *Implements: SR-01, SR-02, SR-03, SR-11, §11.3*
 - Cargo package `osza-netmon` (lib + bin), latest stable edition supported by a pinned toolchain; `rust-toolchain.toml`; `Cargo.lock` committed; `[lints]` and release profile (`lto="thin"`, `codegen-units=1`, `strip`, `panic="unwind"`).
-- `deny.toml`, `rustfmt.toml` (minimal), `.gitignore`, `README.md` stub, `AGENTS.md` (Appendix F), `docs/` skeleton, `plan.md` at the root, CI workflow running all §11.3 gates. License field per ADR-014 is a placeholder (`publish = false`).
+- `deny.toml`, `rustfmt.toml` (minimal), `.gitignore`, `README.md` stub, `AGENTS.md` (Appendix F), `docs/` skeleton, `plan.md` at the root, CI workflow running all §11.3 gates. License per ADR-014: verbatim GPL-3.0 `LICENSE`, `license = "GPL-3.0-only"`, SPDX header on every `.rs` file (CI-enforced), `publish = false`; `deny.toml` license allowlist limited to GPL-3.0-compatible licenses and bans the §9.1 prohibited crates.
 - **Acceptance:** fresh clone builds; all gates pass in CI; `--version` prints name/version; a deliberate `unsafe` block, `unwrap()` or `println!` in a scratch commit is rejected by the gates; exact ratatui version pinned and recorded.
 
 **T-001 ADR records** · S · *Depends: T-000*
@@ -746,14 +760,14 @@ Authoritative scope summaries. The Manager issues a full task card (Appendix A) 
 - `examples/poc_discover.rs`: prints observations and a summary with counters (no TUI).
 - **Acceptance:** fake-transport tests for every behavior above using the fake clock; manual run in an authorized lab shows discovered devices; capability-drop test passes; no `unsafe` in our code.
 
-**T-105 PoC measurement campaign and decision report** · M · *Partly human-run; protocol in Appendix D*
-- Run the protocol on reference networks and netns; compare transports (criteria §9.2), neighbor sources, probe strategies (rate, passes, sender IP `0.0.0.0` vs interface IP, unicast refresh of known devices).
+**T-105 PoC measurement campaign and decision report** · M · *Mostly agent-run in netns; one human-run observation on the Owner's isolated network; protocol in Appendix D*
+- Run the protocol on the synthetic networks (netns profiles P0–P3) and on the Owner's isolated Wi-Fi (observation only); compare transports (criteria §9.2), neighbor sources, probe strategies (rate, passes, sender IP `0.0.0.0` vs interface IP, unicast refresh of known devices).
 - Deliver `docs/poc/poc-report.md` with raw data, recall per cycle, timings, packet counts, failure cases; proposed ADR-009/010/011; limitation catalog; go / adjust / stop recommendation against G-1.
 - **Acceptance:** every Appendix D metric reported with method; recommendations justified by data, not preference.
 
 **T-106 Network-namespace integration harness** · M · *Implements: §11.2*
-- Scripts and Rust integration tests for S1–S7 behind `OSZA_NETNS_TESTS=1`; dev-only helper for hostile frames; CI job (privileges documented).
-- **Acceptance:** all scenarios pass locally and in CI (or CI limitation documented with the local procedure); S6 asserts egress contents.
+- Scripts and Rust integration tests for S1–S9 behind `OSZA_NETNS_TESTS=1`; dev-only helper for hostile frames and for sleepy/impaired responders; impairment profiles P0–P3; CI job (privileges documented).
+- **Acceptance:** S1–S7 pass locally and in CI (or CI limitation documented with the local procedure); S6 asserts egress contents; S8/S9 produce the recall tables required by G-1 and T-105.
 
 ### Phase 2 — Core
 
@@ -821,12 +835,12 @@ Authoritative scope summaries. The Manager issues a full task card (Appendix A) 
 - Walk the threat model (§7.1) item by item with evidence; long fuzz runs; verify no `unsafe`; audit/deny; privilege-drop and egress tests in CI; log-policy tests; dependency review.
 - **Acceptance:** a signed-off checklist in the report mapping every SR to evidence; zero open Blocker/Major findings.
 
-**T-405 Documentation and packaging** · M · *Depends on owner confirmation of ADR-001, ADR-014*
+**T-405 Documentation and packaging** · M · *Needs O-7 resolved*
 - `README.md`, `docs/usage.md` (one page, first-60-seconds flow), `docs/permissions.md` (including the `setcap` procedure, group restriction, read-only mode), `docs/limitations.md`, `SECURITY.md`, `docs/architecture.md`; reproducible release build, checksums, packaging script.
 - **Acceptance:** a fresh machine can follow the docs to a working install; no document claims completeness (AC-14); vocabulary check passes.
 
 **T-406 Acceptance campaign and release candidate** · M · *Human-run with executor support*
-- Execute `docs/test-matrix.md` on authorized real networks; produce the AC traceability table with evidence.
+- Execute `docs/test-matrix.md` on the Owner's network (limited-visibility case) and the full netns suites; produce the AC traceability table with evidence and the validation-scope statement for `docs/limitations.md`.
 - **Acceptance:** AC-01…AC-17 each marked Met with links to evidence; Owner sign-off.
 
 ---
@@ -935,6 +949,7 @@ Blocking questions mean the agent stops that part of the work and reports immedi
 | R-12 | Tool misuse on unauthorized networks | Legal/ethical | Notice, local-only scope, public-range confirmation, bounded rate, license disclaimer | Owner |
 | R-13 | Dropping capabilities fails or is incomplete | Privilege retained | Verified by test (SR-06); `no_new_privs`; reviewed | Executor/Reviewer |
 | R-14 | Relative-time/timezone dependency adds weight or unsoundness | Quality | Decision at T-304 with §9.2; UTC fallback | Executor |
+| R-15 | Real-network validation gap: the Owner's only real network isolates Wi-Fi clients, so behavior on wired LANs and open Wi-Fi is unvalidated | Hidden real-world failures; overstated confidence | Synthetic impairment profiles (T-106), honest wording in docs and release notes ("validated on synthetic networks and one client-isolated Wi-Fi network"), invite community test reports, revisit when a wired or open network becomes available | Manager/Owner |
 
 ---
 
@@ -968,7 +983,7 @@ Entry rule: a feature must serve one of the four questions (§1.2) and receive i
 | AC-10 | Failures and permission errors reported clearly | T-401, T-104 |
 | AC-11 | No port scan, OS fingerprinting or threat detection | T-106 (S6), T-404, reviews |
 | AC-12 | Terminal restored on exit | T-301, T-306 |
-| AC-13 | Automated tests pass; workflow verified on an authorized network | T-106, T-406 |
+| AC-13 | Automated tests pass; documented discovery workflow verified on an authorized network (netns suites and the Owner's client-isolated Wi-Fi; see R-15) | T-106, T-406 |
 | AC-14 | Docs never claim full visibility | T-405, §11.7 check |
 | AC-15 | Missing privilege → read-only mode with actionable guidance | T-104, T-401 |
 | AC-16 | Security hardening complete (fuzz, audit, privilege drop, validation) | T-404 |
@@ -978,14 +993,16 @@ Entry rule: a feature must serve one of the four questions (§1.2) and receive i
 
 ## 20. Open Items for the Owner
 
-| # | Item | Needed by | Default if unanswered |
-|---|---|---|---|
-| O-1 | Confirm product name (ADR-001) | before T-405 | keep `osza-netmon` |
-| O-2 | Choose license (ADR-014) | before T-405 | stay `publish = false`; no release |
-| O-3 | CI provider and runner permissions (ADR-016) | T-000 | GitHub Actions; netns job may need privileged runner |
-| O-4 | Provide authorized test networks: one wired /24, one Wi-Fi without isolation, optionally one with isolation; and a ground-truth device list | T-105 | PoC limited to netns; G-1 cannot pass |
-| O-5 | Confirm target platforms/kernels (§3.4) | T-000 | as stated in §3.4 |
-| O-6 | Confirm first-run-only full notice (ADR-004) | T-302 | as stated in ADR-004 |
+| # | Item | Status | Needed by | Default if unanswered |
+|---|---|---|---|---|
+| O-1 | Product name `osza-netmon` (ADR-001) | **Resolved** — confirmed | — | — |
+| O-2 | License (ADR-014) | **Resolved** — GPL-3.0 (variant: see O-7) | — | — |
+| O-3 | CI provider (ADR-016) | **Resolved** — GitHub Actions on `osza-tools/osza-netmon` | — | — |
+| O-4 | Test networks | **Resolved** — the Owner's Wi-Fi isolates clients; validation uses synthetic netns networks (G-1, R-15). If a wired LAN port or non-isolated network becomes available later, the Owner shares it as an extra validation opportunity. | — | — |
+| O-5 | Confirm target platforms/kernels (§3.4) | Open | T-000 | as stated in §3.4 |
+| O-6 | Confirm first-run-only full notice (ADR-004) | Open | T-302 | as stated in ADR-004 |
+| O-7 | `GPL-3.0-only` or `GPL-3.0-or-later` | Open | T-000 | `GPL-3.0-only` |
+| O-8 | Repository settings (Owner action): protect `main` (require PR + passing CI), enable Dependabot/security alerts and private vulnerability reporting | Open | T-000 | recommended, not enforced |
 
 ---
 
@@ -1029,6 +1046,7 @@ Gates: G-0 ☐ · G-1 ☐ · G-2 ☐ · G-3 ☐ · G-4 ☐
 | Version | Date | Change |
 |---|---|---|
 | 1.0.0 | 2026-10-26 | Initial plan derived from the Project Brief v0.1.0 and the Manager's assessment: adds decisions ADR-001…016, security model, aging/identity rules, privilege model, agent protocol and task catalog. |
+| 1.1.0 | 2026-10-26 | Owner answers: name confirmed (ADR-001), GPL-3.0 (ADR-014), GitHub Actions (ADR-016), repository URL. The Owner's real network cannot provide ground truth, so G-1 and AC-13 are re-scoped to synthetic netns validation with impairment profiles P0–P3, scenarios S8/S9 added, risk R-15 added, T-105/T-106 updated, open items O-7/O-8 added. |
 
 ---
 
@@ -1145,7 +1163,9 @@ Submit `docs/reports/T-xxx/execution-01.md` using Appendix B.
 
 ## Appendix D — PoC Measurement Protocol (T-105) and Manual Test Matrix (T-406)
 
-**Reference networks:** (a) wired /24; (b) home Wi-Fi without client isolation; (c) Wi-Fi with client isolation/guest network (expected low visibility); (d) Wi-Fi with many phones and sleeping devices; (e) netns synthetic with 250 hosts; (f) netns with proxy ARP; (g) container bridge. For (a)(b)(d) the Owner supplies a ground-truth list (e.g., router DHCP lease list, plus devices known to be silent).
+**Available environments (Owner decision, plan v1.1.0):** the Owner's real Wi-Fi network isolates clients, so it serves only as scenario (c). Ground-truth recall is therefore measured on synthetic networks. Scenarios: (c) the Owner's isolated Wi-Fi — observation only (expected near-zero visibility; verifies clean completion, the neighbor-table path and the honest UX); (e) netns synthetic, 250 hosts; (f) netns with proxy ARP; (g) container bridge; and optionally (a) wired /24, (b) non-isolated Wi-Fi, (d) Wi-Fi with many sleeping phones — if access becomes available, with a ground-truth device list.
+
+**Impairment profiles for synthetic runs:** P0 none · P1 5% frame loss · P2 20% loss plus 50–200 ms delay/jitter · P3 sleepy hosts (helper responder ignores the first N requests, answers a fraction, or answers late).
 
 **Per run record:** date, network type, scope size, mode, transport, rate, passes, sender IP variant, number of known devices, devices discovered per cycle (1–3), false/extra entries, time to first device, sweep duration, packets sent, replies received/rejected by reason, CPU time, notes on devices that never answered.
 
@@ -1155,7 +1175,7 @@ Submit `docs/reports/T-xxx/execution-01.md` using Appendix B.
 | Variant | Recall cycle 1 | Recall cycle 3 | Extras | Time to first | Sweep time | Packets | Notes |
 |---|---|---|---|---|---|---|---|
 
-**Manual acceptance matrix (T-406)** re-runs the shipped binary on (a), (b), (c), (d) and checks each AC from §19 with screenshots or terminal recordings stored without real identifiers.
+**Manual acceptance matrix (T-406)** re-runs the shipped binary on every available environment ((c) at minimum, plus (a), (b), (d) if available) together with the netns suites, and checks each AC from §19 with screenshots or terminal recordings stored without real identifiers.
 
 ## Appendix E — Reference Data Formats
 
@@ -1174,6 +1194,7 @@ Authority: plan.md. Read your task card and the plan sections it cites before co
 1. Do exactly what the task card says. Out-of-scope ideas go to "Suggested follow-ups".
 2. Stop and write a Plan Question when the plan is ambiguous or conflicts with the card.
 3. No new dependencies without Manager approval. No `unsafe`. No println!/eprintln! outside main.rs pre-init/post-restore.
+   New .rs files start with `// SPDX-License-Identifier: GPL-3.0-only`; dependencies must be GPL-3.0-compatible (deny.toml).
 4. External input is hostile: validate at the boundary, never panic, bound all sizes and waits.
 5. Never weaken, skip or delete tests to get green.
 6. Run before submitting: cargo fmt --check; cargo clippy --all-targets --all-features -- -D warnings;
