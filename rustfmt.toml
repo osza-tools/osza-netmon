@@ -1,0 +1,4 @@
+# Minimal rustfmt configuration (task T-000). Everything is default
+# except the edition, kept in sync with Cargo.toml so standalone rustfmt
+# runs produce the same output as `cargo fmt`.
+edition = "2024"

@@ -1,0 +1,13 @@
+# clippy.toml for osza-netmon (task T-000).
+#
+# The lints denied through Cargo.toml [lints.clippy] (plan §7 SR-02 and
+# SR-03) stay denied in production code; the options below re-enable
+# them inside test code only. Each option name was verified against the
+# pinned clippy 1.99.1 — see docs/reports/T-000/execution-01.md §6 for
+# the verification method and results.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-print-in-tests = true
+allow-dbg-in-tests = true
