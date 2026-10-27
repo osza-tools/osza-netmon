@@ -79,11 +79,6 @@ where
     }
 }
 
-#[allow(dead_code)]
-fn violation_println() {
-    println!("violation");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
