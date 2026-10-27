@@ -80,12 +80,6 @@ where
 }
 
 #[allow(dead_code)]
-fn violation_unsafe() -> u8 {
-    let x = 1u8;
-    unsafe { x + 1 }
-}
-
-#[allow(dead_code)]
 fn violation_unwrap() -> u32 {
     let v: Option<u32> = None;
     v.unwrap()
