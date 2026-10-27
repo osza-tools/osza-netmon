@@ -233,9 +233,9 @@ fn packed_octet(packed: u64, index: u32) -> u8 {
 }
 
 #[allow(dead_code)]
-fn violation_unsafe() -> u8 {
-    let x = 1u8;
-    unsafe { x + 1 }
+fn violation_unwrap() -> u32 {
+    let v: Option<u32> = None;
+    v.unwrap()
 }
 
 #[cfg(test)]
