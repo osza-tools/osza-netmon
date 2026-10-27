@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Document** | `plan.md` — the single source of truth for this project |
-| **Plan version** | 1.1.0 |
+| **Plan version** | 1.2.0 |
 | **Targets product version** | 0.1.0 (MVP) |
 | **Status** | Approved for execution — Phase 0 may start |
 | **Ecosystem** | osza-tools |
@@ -1011,7 +1011,7 @@ Entry rule: a feature must serve one of the four questions (§1.2) and receive i
 | Task | Title | Status | Last decision |
 |---|---|---|---|
 | T-000 | Repository bootstrap | TODO | — |
-| T-001 | ADR records | TODO | — |
+| T-001 | ADR records | DONE | ACCEPT |
 | T-002 | Core primitives | TODO | — |
 | T-101 | Interfaces, scope, default route | TODO | — |
 | T-102 | Neighbor table reader | TODO | — |
@@ -1047,6 +1047,7 @@ Gates: G-0 ☐ · G-1 ☐ · G-2 ☐ · G-3 ☐ · G-4 ☐
 |---|---|---|
 | 1.0.0 | 2026-10-26 | Initial plan derived from the Project Brief v0.1.0 and the Manager's assessment: adds decisions ADR-001…016, security model, aging/identity rules, privilege model, agent protocol and task catalog. |
 | 1.1.0 | 2026-10-26 | Owner answers: name confirmed (ADR-001), GPL-3.0 (ADR-014), GitHub Actions (ADR-016), repository URL. The Owner's real network cannot provide ground truth, so G-1 and AC-13 are re-scoped to synthetic netns validation with impairment profiles P0–P3, scenarios S8/S9 added, risk R-15 added, T-105/T-106 updated, open items O-7/O-8 added. |
+| 1.2.0 | 2026-10-28 | T-001 accepted: `docs/adr/` directory created with 16 ADR files transcribed from §4; `index.md` master index added; `AGENTS.md` updated with decision-log reference; PQ-1 resolved (v1.1.0 statuses authoritative per §0.2 precedence); mechanical fidelity check confirms 87 verbatim quoted sentences. |
 
 ---
 
