@@ -80,9 +80,8 @@ where
 }
 
 #[allow(dead_code)]
-fn violation_unwrap() -> u32 {
-    let v: Option<u32> = None;
-    v.unwrap()
+fn violation_println() {
+    println!("violation");
 }
 
 #[cfg(test)]
