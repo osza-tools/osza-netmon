@@ -79,6 +79,13 @@ where
     }
 }
 
+
+#[allow(dead_code)]
+fn violation_unsafe() -> u8 {
+    let x = 1u8;
+    unsafe { x + 1 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
