@@ -79,7 +79,6 @@ where
     }
 }
 
-
 #[allow(dead_code)]
 fn violation_unsafe() -> u8 {
     let x = 1u8;
