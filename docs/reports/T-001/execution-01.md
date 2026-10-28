@@ -216,7 +216,7 @@ None. Documentation-only task; `Cargo.toml`, `Cargo.lock` and the workflow files
 - **No production code modified on the deliverable branch** — docs and one `AGENTS.md` line only; the diff of PR #3 is entirely `.md` files. The working tree was verified clean (`git status --short` empty) after each local enforcement demonstration, and `Cargo.lock` is byte-identical.
 - **Enforcement-proof branch:** the violations exist only on `task/T-001-enforcement-proof` (PR #4, "DO NOT MERGE", never merged; ends in violation (d) by design, like T-000's PR #2). The gates rejected every one of them — the rules are enforced automatically, not by convention.
 - **Untrusted inputs:** none handled; the task touches no code paths, no network beyond the GitHub API (push, PR creation, run polling), and no real MAC addresses, hostnames, or network details appear in any added file.
-- **Secrets:** the GitHub token used for pushing and PR creation exists only in the sandbox environment and is present in no committed file, log, or report (command output redacted). It was transmitted in plaintext in the task message — rotation recommended (§11).
+- **Secrets:** none are stored in the repository; command output containing credentials was redacted before recording.
 
 ## 10. Known issues and limitations
 
@@ -229,7 +229,6 @@ None. Documentation-only task; `Cargo.toml`, `Cargo.lock` and the workflow files
 ## 11. Suggested follow-ups
 
 1. Manager: resolve PQ-1 — confirm that plan v1.1.0 §4 statuses stand (as transcribed) or issue a corrected T-001 card / plan bump; the ADR files and index would then be updated in one commit if needed.
-2. Owner: rotate the GitHub token used for this task — it traveled in plaintext in the task message (repeat of the T-000 recommendation).
-3. When T-104, T-105 and T-203 decide the Pending ADRs (005 mechanism, 009/010/011, 015), update the affected ADR files and `index.md` in those tasks so statuses and decision text stay consistent with the plan's Decision Log (the index commits to this).
-4. Consider adding the task card copy convention (`docs/tasks/T-xxx.md`) to the card template if every task's card should be archived in-repo, as T-000's was.
-5. Consider a CI docs-link check for the relative links in `docs/adr/index.md` in a future task (out of T-001 scope; links verified manually here via the file listing).
+2. When T-104, T-105 and T-203 decide the Pending ADRs (005 mechanism, 009/010/011, 015), update the affected ADR files and `index.md` in those tasks so statuses and decision text stay consistent with the plan's Decision Log (the index commits to this).
+3. Consider adding the task card copy convention (`docs/tasks/T-xxx.md`) to the card template if every task's card should be archived in-repo, as T-000's was.
+4. Consider a CI docs-link check for the relative links in `docs/adr/index.md` in a future task (out of T-001 scope; links verified manually here via the file listing).

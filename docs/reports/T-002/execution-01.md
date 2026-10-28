@@ -237,7 +237,7 @@ None added or changed. `Cargo.toml`, `Cargo.lock` are untouched on the deliverab
 - **Terminal safety (§7.1):** the `DisplayText` recognizer consumes complete ANSI sequences (CSI, OSC incl. BEL/ST/unterminated, intermediate-byte forms), and any control character that survives a malformed sequence is caught by the per-character strip list — belt and suspenders; the property test asserts no stripped character class can appear in output.
 - **No `unsafe` (SR-01), no printing (SR-03):** none in the model; re-proven by the four red enforcement runs in §4.
 - **Untrusted inputs in tests:** all MACs, hostnames and vendor strings in tests are synthetic (generated or well-known documentation examples like `01:00:5e:…`); no real device identifiers from any actual network appear in the repository (plan §14.3 rule 8).
-- **Secrets:** the GitHub token used for pushing and PR creation exists only in the sandbox environment and appears in no committed file, log or report (command output redacted). It was transmitted in plaintext in the task message — rotation recommended (§11).
+- **Secrets:** none are stored in the repository; command output containing credentials was redacted before recording.
 
 ## 10. Known issues and limitations
 
@@ -251,8 +251,7 @@ None added or changed. `Cargo.toml`, `Cargo.lock` are untouched on the deliverab
 ## 11. Suggested follow-ups
 
 1. Manager: resolve PQ-1 (`proptest` now vs at T-103), PQ-2/PQ-3 (confirm the applied DisplayText semantics); if any decision is reversed, the changes are localized to `text.rs` + its tests.
-2. Owner: rotate the GitHub token used for this task — it traveled in plaintext in the task message (third consecutive report with this recommendation).
-3. Consider a `Display` impl for `Ipv4Net` (CIDR form `a.b.c.d/n`) when T-101 starts consuming it — trivial, but out of this card's scope.
-4. When T-102/T-103 land, revisit whether `MacAddr::from_octets`' error type should carry the observation context (e.g. which filter rejected a neighbor entry) — current variants already carry the §5.3 reason.
-5. Consider promoting the `model::testing::Lcg` into a shared test-support module if later tasks want the same deterministic property harness (or replacing it per PQ-1's outcome).
-6. The vocabulary check (§11.7) currently has no `src/ui/` to scan; when T-30x lands, extend the check to also cover model error strings (`ValidationError`, `MacAddrParseError`, `Ipv4NetError` Display output) — they are written to §5.4 today but not yet mechanically enforced.
+2. Consider a `Display` impl for `Ipv4Net` (CIDR form `a.b.c.d/n`) when T-101 starts consuming it — trivial, but out of this card's scope.
+3. When T-102/T-103 land, revisit whether `MacAddr::from_octets`' error type should carry the observation context (e.g. which filter rejected a neighbor entry) — current variants already carry the §5.3 reason.
+4. Consider promoting the `model::testing::Lcg` into a shared test-support module if later tasks want the same deterministic property harness (or replacing it per PQ-1's outcome).
+5. The vocabulary check (§11.7) currently has no `src/ui/` to scan; when T-30x lands, extend the check to also cover model error strings (`ValidationError`, `MacAddrParseError`, `Ipv4NetError` Display output) — they are written to §5.4 today but not yet mechanically enforced.

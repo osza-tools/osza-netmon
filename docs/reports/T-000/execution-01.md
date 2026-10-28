@@ -183,7 +183,7 @@ No other dependencies, and no dev-dependencies, were added.
 - **Untrusted inputs touched:** command-line arguments only. They are read via `std::env::args_os()` (never panicking on non-UTF-8), converted with an explicit `to_str()` check, and mapped to a typed `ArgError` printed as one stderr line with exit code 2 — no panic is reachable from argv (tested with raw bytes `0xff 0xfe 0xfd`). No files, no network, no environment parsing.
 - **SR-01/SR-02/SR-03 enforced mechanically** (`unsafe_code = "forbid"`; the eight denied clippy lints; test-only relief confined to `clippy.toml`; the print allows confined to three functions in `main.rs` behind a justification comment) — and their enforcement is itself proven by the four red CI runs in §4.
 - **Supply chain:** `Cargo.lock` committed; every Cargo command that resolves dependencies runs `--locked`; sources restricted to crates.io (`unknown-registry`/`unknown-git` denied); prohibited crates deny-listed and absent from the tree; CI actions pinned by commit SHA; cargo-audit/cargo-deny installed from official releases at pinned versions with SHA-256 verification of the tarballs; advisories (vulnerabilities, unmaintained, yanked) are hard errors.
-- **Secrets:** the GitHub token used for pushing and PR creation exists only in the sandbox environment; it is not present in any committed file, log, or report (all command output was redacted). It was transmitted in the task message, so the Owner should rotate it (see §11). No real MAC addresses, hostnames, or network details were handled.
+- **Secrets:** no secrets are stored in the repository; command output containing credentials was redacted before recording. No real MAC addresses, hostnames, or network details were handled.
 
 ## 10. Known issues and limitations
 
@@ -195,5 +195,4 @@ No other dependencies, and no dev-dependencies, were added.
 ## 11. Suggested follow-ups
 
 1. Manager: publish plan v1.1.0 — add O-7 (license = GPL-3.0-only), the T-000 license/SPDX requirements, `Apache-2.0 WITH LLVM-exception` in the §9.2 license wording, and a Changelog entry (resolves PQ-1/PQ-3).
-2. Owner: rotate the GitHub token used for this task, since it traveled in plaintext in the task message.
-3. Proceed with T-001 (ADR records) and T-002 (core primitives) per the dependency graph; both only need T-000.
+2. Proceed with T-001 (ADR records) and T-002 (core primitives) per the dependency graph; both only need T-000.
