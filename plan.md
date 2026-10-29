@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Document** | `plan.md` — the single source of truth for this project |
-| **Plan version** | 1.2.0 |
+| **Plan version** | 1.3.0 |
 | **Targets product version** | 0.1.0 (MVP) |
 | **Status** | Approved for execution — Phase 0 may start |
 | **Ecosystem** | osza-tools |
@@ -1012,7 +1012,7 @@ Entry rule: a feature must serve one of the four questions (§1.2) and receive i
 |---|---|---|---|
 | T-000 | Repository bootstrap | TODO | — |
 | T-001 | ADR records | DONE | ACCEPT |
-| T-002 | Core primitives | TODO | — |
+| T-002 | Core primitives | DONE | ACCEPT |
 | T-101 | Interfaces, scope, default route | TODO | — |
 | T-102 | Neighbor table reader | TODO | — |
 | T-103 | ARP codec | TODO | — |
@@ -1048,6 +1048,7 @@ Gates: G-0 ☐ · G-1 ☐ · G-2 ☐ · G-3 ☐ · G-4 ☐
 | 1.0.0 | 2026-10-26 | Initial plan derived from the Project Brief v0.1.0 and the Manager's assessment: adds decisions ADR-001…016, security model, aging/identity rules, privilege model, agent protocol and task catalog. |
 | 1.1.0 | 2026-10-26 | Owner answers: name confirmed (ADR-001), GPL-3.0 (ADR-014), GitHub Actions (ADR-016), repository URL. The Owner's real network cannot provide ground truth, so G-1 and AC-13 are re-scoped to synthetic netns validation with impairment profiles P0–P3, scenarios S8/S9 added, risk R-15 added, T-105/T-106 updated, open items O-7/O-8 added. |
 | 1.2.0 | 2026-10-28 | T-001 accepted: `docs/adr/` directory created with 16 ADR files transcribed from §4; `index.md` master index added; `AGENTS.md` updated with decision-log reference; PQ-1 resolved (v1.1.0 statuses authoritative per §0.2 precedence); mechanical fidelity check confirms 87 verbatim quoted sentences. |
+| 1.3.0 | 2026-10-28 | T-002 accepted: `src/model/` primitives delivered (MacAddr, Hostname, DisplayText, Field/Source/Reason, Clock/FakeClock, IPv4 helpers + Ipv4Net caps); 45 tests including std-only LCG property suites. Plan Questions resolved: PQ-1 — `proptest` deferred to T-103, std LCG retained; PQ-2 — `DisplayText` collapses whitespace before stripping non-whitespace controls so word boundaries survive; PQ-3 — empty-after-sanitization rejected (`ValidationError::DisplayTextEmpty`), absence modeled via `Field`. PR #5 merged; PR #6 retained as enforcement proof (never merged). |
 
 ---
 
