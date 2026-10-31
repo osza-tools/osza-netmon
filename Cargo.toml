@@ -19,6 +19,12 @@ publish = false
 # fixed. Resolved versions are recorded in docs/reports/T-000/execution-01.md.
 ratatui = "=0.30.2"
 thiserror = "2"
+# Interface enumeration via getifaddrs(3) — the safe wrapper ADR-017 chose
+# after the §9.2 evaluation (docs/adr/017-interface-data-source.md and
+# docs/reports/T-101/execution-01.md §7). Exact pin like ratatui; only the
+# "net" feature is enabled (no fs/ioctl/event/... code compiled in).
+# Manager approval recorded as PQ-1 in the T-101 execution report.
+nix = { version = "=0.31.3", default-features = false, features = ["net"] }
 
 [lints.rust]
 # plan §7 SR-01: no unsafe anywhere in this package.
