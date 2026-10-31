@@ -8,8 +8,13 @@
 //!
 //! Task T-002 adds the domain model under [`model`]: the boundary-validated
 //! core primitives of `plan.md` §5.2–5.3.
+//!
+//! Task T-101 adds the [`net`] layer: interface discovery and scope
+//! derivation (`net::interfaces`, `plan.md` §6.2 FR-SC-01…05) — the first
+//! piece of the Phase 1 proof of concept, still without any network I/O.
 
 pub mod model;
+pub mod net;
 
 use std::ffi::OsString;
 
