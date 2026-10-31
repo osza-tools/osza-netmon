@@ -2,6 +2,8 @@
 
 **Agent:** E-Vex (executor identity used for all commits) · **Date:** 2026-10-31 · **Branch/commits:** `task/T-101-interfaces-scope` — `056cf30` (ADR-017 + dependency decision), `a066ee4` (`src/net/` implementation), plus this report · **Plan version:** 1.3.0 (repository copy, commit `eea151e`)
 
+**Pull request:** https://github.com/osza-tools/osza-netmon/pull/7 · **Green CI run:** https://github.com/osza-tools/osza-netmon/actions/runs/41215717497 (commit `97be045`, all jobs green)
+
 ## 1. Summary (≤ 5 lines)
 
 The interface discovery and scope layer of plan §6.2 is implemented in `src/net/interfaces.rs`: `InterfaceInfo` with every FR-SC-01 field (private fields, accessors), FR-SC-03 eligibility with typed reasons, FR-SC-02 class/ranking/suggestion, a total `/proc/net/route` parser (little-endian hex per Appendix E) and FR-SC-04/05/06 scope derivation via the T-002 `Ipv4Net`. Data source decided by ADR-017: `getifaddrs(3)` through the `nix` safe wrapper (one new direct dependency, **zero new crates in the graph** — the `Cargo.lock` diff is a single line, PQ-1 raised per card §8). 28 new tests (fixtures, malformed lines, ranking drain, all six prefix lengths, 2×1,000 hostile-input property tests, live invariants); 80 unit + 3 doctest total, all §11.3 gates green locally.

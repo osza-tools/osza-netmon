@@ -1010,10 +1010,10 @@ Entry rule: a feature must serve one of the four questions (§1.2) and receive i
 
 | Task | Title | Status | Last decision |
 |---|---|---|---|
-| T-000 | Repository bootstrap | TODO | — |
+| T-000 | Repository bootstrap | DONE | ACCEPT |
 | T-001 | ADR records | DONE | ACCEPT |
 | T-002 | Core primitives | DONE | ACCEPT |
-| T-101 | Interfaces, scope, default route | TODO | — |
+| T-101 | Interfaces, scope, default route | DONE | ACCEPT |
 | T-102 | Neighbor table reader | TODO | — |
 | T-103 | ARP codec | TODO | — |
 | T-104 | ARP scanner and privilege handling | TODO | — |

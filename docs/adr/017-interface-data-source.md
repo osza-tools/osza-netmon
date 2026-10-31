@@ -1,6 +1,6 @@
 # ADR-017: Interface data source
 
-- **Status:** Accepted (Manager confirmation pending — PQ-1 in `docs/reports/T-101/execution-01.md`)
+- **Status:** Accepted (PQ-1 resolved by Manager decision, 2026-10-31)
 - **Date:** 2026-10-31 · **Deciding task / owner:** T-101 / Executor proposes, Manager confirms
 
 ## Context
