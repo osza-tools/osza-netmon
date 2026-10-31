@@ -744,6 +744,7 @@ dependencies = [
 name = "osza-netmon"
 version = "0.1.0"
 dependencies = [
+ "nix 0.31.3",
  "ratatui",
  "thiserror 2.0.21",
 ]
