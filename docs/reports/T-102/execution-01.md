@@ -90,7 +90,7 @@ $ grep -rn "println!\|eprintln!" src/discovery/ || echo "No println/eprintln fou
 No println/eprintln found
 
 $ grep -rn "unwrap\|expect" src/discovery/ --include="*.rs" | grep -v "#\[cfg(test)\]" | grep -v "mod tests" || echo "No unwrap/expect in non-test code"
-[27 matches — 24 inside the #[cfg(test)] mod tests that opens at line 572 of src/discovery/neighbor_table.rs, plus 3 in `///` doc-example lines (220, 223, 384) that are doctest code, compiled only by rustdoc as separate test crates. The non-test region (lines 1–571) contains zero matches — cross-checked directly: awk 'NR<572 && /unwrap|expect/' src/discovery/neighbor_table.rs → 0 lines. Test-only unwrap/expect is permitted by clippy.toml (allow-*-in-tests); clippy is the authoritative enforcement and is green.]
+[27 matches — 24 inside the #[cfg(test)] mod tests that opens at line 572 of src/discovery/neighbor_table.rs, plus 3 in `///` doc-example lines (220, 223, 384) that are doctest code, compiled only by rustdoc as separate test crates. Cross-checked directly: awk 'NR<572 && /unwrap|expect/' src/discovery/neighbor_table.rs → 3 lines, exactly the three doc-example lines above; the compiled non-test region contains none (the pattern also matches the word "expected" in four test assertions, all inside the test module). Test-only unwrap/expect is permitted by clippy.toml (allow-*-in-tests); clippy is the authoritative enforcement and is green.]
 
 $ find src/discovery -name "*.rs" -exec head -1 {} \; | sort | uniq -c
       2 // SPDX-License-Identifier: GPL-3.0-only
