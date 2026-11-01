@@ -22,9 +22,28 @@ thiserror = "2"
 # Interface enumeration via getifaddrs(3) — the safe wrapper ADR-017 chose
 # after the §9.2 evaluation (docs/adr/017-interface-data-source.md and
 # docs/reports/T-101/execution-01.md §7). Exact pin like ratatui; only the
-# "net" feature is enabled (no fs/ioctl/event/... code compiled in).
-# Manager approval recorded as PQ-1 in the T-101 execution report.
-nix = { version = "=0.31.3", default-features = false, features = ["net"] }
+# "net" and "process" features are enabled (no fs/ioctl/event/... code
+# compiled in). Manager approval recorded as PQ-1 in the T-101 execution
+# report. T-104 (PQ-1 of its report) additionally enables "process" for
+# nix::sys::prctl::set_no_new_privs (ADR-005 step 3) — same crate, same
+# pinned version, no new transitive dependency.
+nix = { version = "=0.31.3", default-features = false, features = ["net", "process"] }
+# Production ArpTransport (task T-104): opens and binds the AF_PACKET
+# socket (the only candidate of §9.1's transport list whose bind/send/recv
+# path needs no `unsafe` of our own — nix and socket2 expose no safe
+# sockaddr_ll constructor; see the §9.2 evaluation in
+# docs/reports/T-104/execution-01.md §7). Exact pin like ratatui and nix.
+# PROVISIONAL per ADR-009 (Pending, decided by T-105): fully hidden
+# behind the ArpTransport trait so the library can be replaced in one
+# module. Manager approval recorded as PQ-1 in the T-104 execution report.
+pnet_datalink = "=0.35.0"
+# Capability dropping (ADR-005 step 3, task T-104): effective/permitted/
+# inheritable/ambient (+ bounding when CAP_SETPCAP is held) via the safe
+# caps:: API. Chosen over capctl per the §9.2 evaluation in
+# docs/reports/T-104/execution-01.md §7 (fresh release line, libc-only
+# transitive). Exact pin like the other task-approved crates. Manager
+# approval recorded as PQ-1 in the T-104 execution report.
+caps = "=0.5.6"
 
 [lints.rust]
 # plan §7 SR-01: no unsafe anywhere in this package.
