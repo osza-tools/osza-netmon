@@ -17,6 +17,12 @@
 //! reader (`discovery::neighbor_table`, `plan.md` §6.3 FR-DS-01/FR-DS-02,
 //! SR-10) — the first discovery data source, reading `/proc/net/arp`
 //! without any network I/O.
+//!
+//! Task T-103 adds the ARP wire format to [`discovery`]
+//! (`discovery::arp`, `plan.md` §6.3 FR-DS-03/FR-DS-06, §7.2 SR-02/
+//! SR-05): the 42-byte Ethernet+ARP request builder and the total,
+//! solicited-only reply validator — still pure byte manipulation with
+//! no socket I/O; the transport is T-104, behind the pending ADR-009.
 
 pub mod discovery;
 pub mod model;

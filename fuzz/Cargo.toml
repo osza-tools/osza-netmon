@@ -1,0 +1,60 @@
+# Fuzz targets for osza-netmon (plan §8.1: "fuzz/ … (separate package)";
+# task T-103, SR-05).
+#
+# This is a standalone package, not a member of the root package's
+# workspace: the empty [workspace] table below pins that, so the root
+# gates (fmt/clippy/test/doc/audit/deny) keep covering exactly the
+# shipping crate, and this package carries its own lockfile with the
+# same resolved versions.
+#
+# The harness is std-only by decision (T-103 report §6): wiring
+# libfuzzer-sys / cargo-fuzz would add a crates.io dependency, which
+# the task card forbids without a Plan Question (§14.5). The target
+# therefore drives the parser with a deterministic PRNG and
+# structure-aware mutations; see arp_frame.rs for the stage list.
+#
+# Build/run it from this directory (the .cargo/config.toml here keeps
+# artifacts in ../target, which is git-ignored):
+#
+#     cd fuzz && cargo run --bin arp_frame
+# or, from the repository root:
+#
+#     cargo run --manifest-path fuzz/Cargo.toml --bin arp_frame --target-dir target
+
+[package]
+name = "osza-netmon-fuzz"
+version = "0.1.0"
+edition = "2024"
+# Keep in sync with the root Cargo.toml MSRV.
+rust-version = "1.89"
+description = "Fuzz targets for osza-netmon (std-only deterministic harnesses)"
+repository = "https://github.com/osza-tools/osza-netmon"
+license = "GPL-3.0-only"
+publish = false
+
+# Standalone package (see above).
+[workspace]
+
+[dependencies]
+osza-netmon = { path = ".." }
+
+[[bin]]
+name = "arp_frame"
+path = "arp_frame.rs"
+
+# The same never-panic discipline as the root package (plan §7 SR-01/
+# SR-02). The print lints stay denied too; arp_frame.rs carries the one
+# narrowly scoped allow on `main` — a fuzz *binary* reports its own
+# summary, exactly like the root main.rs pattern for the CLI boundary.
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
