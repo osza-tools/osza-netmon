@@ -12,7 +12,13 @@
 //! Task T-101 adds the [`net`] layer: interface discovery and scope
 //! derivation (`net::interfaces`, `plan.md` §6.2 FR-SC-01…05) — the first
 //! piece of the Phase 1 proof of concept, still without any network I/O.
+//!
+//! Task T-102 adds the [`discovery`] layer: the kernel neighbor-table
+//! reader (`discovery::neighbor_table`, `plan.md` §6.3 FR-DS-01/FR-DS-02,
+//! SR-10) — the first discovery data source, reading `/proc/net/arp`
+//! without any network I/O.
 
+pub mod discovery;
 pub mod model;
 pub mod net;
 
