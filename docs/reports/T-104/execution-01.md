@@ -197,7 +197,7 @@ test result: ok. 2 passed; 0 failed
 ```text
 $ ./target/debug/examples/poc_discover eth0          # as uid 1001, host namespace
 osza-netmon PoC discovery (no TUI)
-interface: eth0 (mac 46:c0:77:1a:2b:b2, ip 21.0.19.91/32, scope 21.0.19.91/32)
+interface: eth0 (mac REDACTED-MAC, ip REDACTED-IP/32, scope REDACTED-IP/32)
 privileges after drop: CapInh=0000000000000000 CapPrm=0000000000000000 CapEff=0000000000000000 CapBnd=00000000a80425fb CapAmb=0000000000000000 NoNewPrivs=1
 neighbor table: 0 entrie(s)
 mode: read-only (no ARP sweep)
@@ -205,6 +205,7 @@ summary: read-only cycle, 0 neighbor-table observation(s)
 exit code: 0
 stderr: no CAP_NET_RAW: starting in read-only mode (neighbor table only); grant it with: setcap cap_net_raw+ep <binary>
 ```
+> Host identifiers redacted per plan §14.3 rule 8 (Manager order T-104-FU1); the capability and mode lines are the evidence.
 
 (Also live evidence for the documented bounding-set limitation: without `CAP_SETPCAP`, `CapBnd` keeps its residual mask — `00000000a80425fb` — while `NoNewPrivs=1` prevents any re-grant.)
 

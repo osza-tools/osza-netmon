@@ -3,9 +3,9 @@
 | | |
 |---|---|
 | **Document** | `plan.md` — the single source of truth for this project |
-| **Plan version** | 1.3.0 |
+| **Plan version** | 1.4.0 |
 | **Targets product version** | 0.1.0 (MVP) |
-| **Status** | Approved for execution — Phase 0 may start |
+| **Status** | Approved for execution — Phase 1 in progress (G-0 passed) |
 | **Ecosystem** | osza-tools |
 | **Product name** | `osza-netmon` (confirmed, ADR-001) |
 | **Repository** | https://github.com/osza-tools/osza-netmon |
@@ -143,11 +143,11 @@ Decisions are recorded as ADRs in `docs/adr/` (task T-001). Status: **Accepted**
 | 002 | Status vocabulary (Recent / Idle) | Accepted |
 | 003 | Hostname resolution policy | Accepted |
 | 004 | Authorization notice policy | Accepted |
-| 005 | Privilege model | Accepted (mechanism details Pending T-104/T-105) |
+| 005 | Privilege model | Accepted (mechanism implemented T-104; PoC confirmation T-105) |
 | 006 | Single-package repository (lib + bin) | Accepted |
 | 007 | Aging model (scan-cycle based) | Accepted |
 | 008 | Device identity and shared-MAC handling | Accepted |
-| 009 | Discovery transport library | Pending (T-105) |
+| 009 | Discovery transport library | Pending (T-105); interim selection ratified T-104 |
 | 010 | Neighbor-table source (`/proc/net/arp` vs netlink) | Pending (T-105) |
 | 011 | Probe strategy (passes, rate, sender IP, unicast refresh) | Pending (T-105), defaults below |
 | 012 | Concurrency: std threads, no async runtime | Accepted |
@@ -155,6 +155,7 @@ Decisions are recorded as ADRs in `docs/adr/` (task T-001). Status: **Accepted**
 | 014 | Project license | Accepted (variant to confirm, O-7) |
 | 015 | DNS PTR client implementation | Pending (T-203) |
 | 016 | CI provider: GitHub Actions | Accepted |
+| 017 | Interface data source (`getifaddrs` via `nix`) | Accepted (T-101) |
 
 ### ADR-001 Naming — Accepted
 The source brief mixes `osza-tools` and `veex-tools`. Names: ecosystem `osza-tools`; crate and binary `osza-netmon`; display name "osza Network Monitor". The name MUST live in exactly one place in code (`pub const APP_NAME`/`DISPLAY_NAME`) plus `Cargo.toml`, so a rename is a one-commit change. The Owner confirmed the name and created the repository at https://github.com/osza-tools/osza-netmon.
@@ -208,7 +209,7 @@ Only cycles with outcome `Complete` age devices; `Partial`, `Failed` and `Cancel
 ### ADR-009/010/011 Pending, with provisional defaults for implementation
 - **ADR-009 transport.** Candidates: `pnet_datalink` (its latest release, 0.35.0, dates from May 2024 — slow cadence; do not assume it), `nix` safe wrappers, `socket2`. Criteria in §9.2; also the transport is hidden behind the `ArpTransport` trait so replacing it costs one module.
 - **ADR-010 neighbor source.** `/proc/net/arp` (simple; no state) vs netlink `RTM_GETNEIGH` (state: reachable/stale/failed). T-102 implements `/proc/net/arp`; T-105 decides whether netlink is worth the dependency.
-- **ADR-011 probe strategy.** Provisional defaults: sender IP = interface IP; **100 packets/s**; initial scan and manual refresh use **2 passes** (second pass only to addresses that did not answer, after ≥ 1 s); periodic rediscovery uses **1 pass**; listen window **1.5 s** after the last send. T-105 also evaluates sender `0.0.0.0` (RFC 5227 style probes) and unicast ARP refresh of known devices.
+- **ADR-011 probe strategy.** Provisional defaults: sender IP = interface IP; **100 packets/s**; initial scan and manual refresh use **2 passes** (second pass only to addresses that did not answer, after ≥ 1 s); periodic rediscovery uses **1 pass**; listen window **1.5 s** after the last send. T-105 also evaluates sender `0.0.0.0` (RFC 5227 style probes) and unicast ARP refresh of known devices. Implementation clamp (T-104, ratified): passes are clamped to 1..=3; the default stays 2. T-105 re-pins this from data.
 
 ### ADR-012 / 013
 - **012:** `std::thread` + bounded channels. No tokio or other async runtime in the MVP.
@@ -763,6 +764,8 @@ Authoritative scope summaries. The Manager issues a full task card (Appendix A) 
 **T-105 PoC measurement campaign and decision report** · M · *Mostly agent-run in netns; one human-run observation on the Owner's isolated network; protocol in Appendix D*
 - Run the protocol on the synthetic networks (netns profiles P0–P3) and on the Owner's isolated Wi-Fi (observation only); compare transports (criteria §9.2), neighbor sources, probe strategies (rate, passes, sender IP `0.0.0.0` vs interface IP, unicast refresh of known devices).
 - Deliver `docs/poc/poc-report.md` with raw data, recall per cycle, timings, packet counts, failure cases; proposed ADR-009/010/011; limitation catalog; go / adjust / stop recommendation against G-1.
+- Measure the cost of the interim transport's `ETH_P_ALL` binding plus software EtherType filter, and evaluate an `ETH_P_ARP`-binding alternative (T-104 deviation 5).
+- Account for pass-2 snapshot semantics in the experiment design: the non-responder set is snapshotted at pass start, so a late answer can be re-probed once (T-104 review F-6).
 - **Acceptance:** every Appendix D metric reported with method; recommendations justified by data, not preference.
 
 **T-106 Network-namespace integration harness** · M · *Implements: §11.2*
@@ -789,6 +792,7 @@ Authoritative scope summaries. The Manager issues a full task card (Appendix A) 
 
 **T-205 Application core (headless)** · L · *Implements: §8.4*
 - `AppState`, `Action`, `AppEvent`, pure `update()`, effects executor in `main`/app wiring, screen state machine (Notice → Scope → Dashboard/Details/Help), message log (last 20), counters; hostname/vendor enrichment integration.
+- ADR-005 item 5: if euid is 0, warn once ("running as root is not required; use file capabilities") and still drop capabilities (assigned by the Manager, T-104-FU1).
 - **Acceptance:** scenario scripts drive the whole flow headlessly (including errors, read-only, resize events, quit); NFR-03 benchmark with 4,096 devices and event bursts.
 
 ### Phase 3 — TUI
@@ -829,6 +833,7 @@ Authoritative scope summaries. The Manager issues a full task card (Appendix A) 
 
 **T-403 Performance and resource verification** · M · *Implements: NFR-01…07, NFR-10*
 - Measure per §11.5; fix regressions found.
+- Tighten the cancellation smoke-test bound to `elapsed − flag_delay ≤ 250 ms` (T-104 review F-5), with CI-jitter margin justified in the report.
 - **Acceptance:** all budgets met or deviations accepted by the Manager in writing.
 
 **T-404 Security hardening pass** · M · *Implements: SR-01…13*
@@ -1014,9 +1019,9 @@ Entry rule: a feature must serve one of the four questions (§1.2) and receive i
 | T-001 | ADR records | DONE | ACCEPT |
 | T-002 | Core primitives | DONE | ACCEPT |
 | T-101 | Interfaces, scope, default route | DONE | ACCEPT |
-| T-102 | Neighbor table reader | TODO | — |
-| T-103 | ARP codec | TODO | — |
-| T-104 | ARP scanner and privilege handling | TODO | — |
+| T-102 | Neighbor table reader | DONE | ACCEPT |
+| T-103 | ARP codec | DONE | ACCEPT |
+| T-104 | ARP scanner and privilege handling | DONE | ACCEPT + FOLLOW-UPS (T-104-FU1) |
 | T-105 | PoC measurement and decision report | TODO | — |
 | T-106 | netns integration harness | TODO | — |
 | T-201 | Device registry | TODO | — |
@@ -1037,7 +1042,7 @@ Entry rule: a feature must serve one of the four questions (§1.2) and receive i
 | T-405 | Documentation and packaging | TODO | — |
 | T-406 | Acceptance campaign | TODO | — |
 
-Gates: G-0 ☐ · G-1 ☐ · G-2 ☐ · G-3 ☐ · G-4 ☐
+Gates: G-0 ☑ · G-1 ☐ · G-2 ☐ · G-3 ☐ · G-4 ☐
 
 ---
 
@@ -1049,6 +1054,7 @@ Gates: G-0 ☐ · G-1 ☐ · G-2 ☐ · G-3 ☐ · G-4 ☐
 | 1.1.0 | 2026-10-26 | Owner answers: name confirmed (ADR-001), GPL-3.0 (ADR-014), GitHub Actions (ADR-016), repository URL. The Owner's real network cannot provide ground truth, so G-1 and AC-13 are re-scoped to synthetic netns validation with impairment profiles P0–P3, scenarios S8/S9 added, risk R-15 added, T-105/T-106 updated, open items O-7/O-8 added. |
 | 1.2.0 | 2026-10-28 | T-001 accepted: `docs/adr/` directory created with 16 ADR files transcribed from §4; `index.md` master index added; `AGENTS.md` updated with decision-log reference; PQ-1 resolved (v1.1.0 statuses authoritative per §0.2 precedence); mechanical fidelity check confirms 87 verbatim quoted sentences. |
 | 1.3.0 | 2026-10-28 | T-002 accepted: `src/model/` primitives delivered (MacAddr, Hostname, DisplayText, Field/Source/Reason, Clock/FakeClock, IPv4 helpers + Ipv4Net caps); 45 tests including std-only LCG property suites. Plan Questions resolved: PQ-1 — `proptest` deferred to T-103, std LCG retained; PQ-2 — `DisplayText` collapses whitespace before stripping non-whitespace controls so word boundaries survive; PQ-3 — empty-after-sanitization rejected (`ValidationError::DisplayTextEmpty`), absence modeled via `Field`. PR #5 merged; PR #6 retained as enforcement proof (never merged). |
+| 1.4.0 | 2026-11-02 | Phase 0 closed: T-000/T-001/T-002 accepted, **G-0 passed**. Phase 1 progress: T-101 (ADR-017), T-102, T-103 accepted; T-104 accepted with follow-ups after independent review (all gates re-run, privileged tests in a user namespace, live two-namespace lab reproduced, /29 differential proved the pass-2 filter). PQ-1 ratified: `pnet_datalink =0.35.0` + `caps =0.5.6` + `nix/process`, interim and contained behind `ArpTransport`; ADR-009 stays Pending for T-105. PQ-2 (`MAX_PASSES=3`) and PQ-3 (event-type placement) accepted. Manager card defects corrected on the record: the transport ADR vehicle is ADR-009 (not a new ADR-018), the `ArpTransport` trait needs no `cancel` method, and `discovery` must not depend on `net`. ADR-005 item 5 assigned to T-205; review F-5 to T-403; F-6 and the `ETH_P_ALL` cost to T-105. |
 
 ---
 

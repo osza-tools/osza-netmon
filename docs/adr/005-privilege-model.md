@@ -1,6 +1,6 @@
 # ADR-005: Privilege model
 
-- **Status:** Accepted (mechanism details Pending T-104/T-105)
+- **Status:** Accepted (mechanism implemented T-104; PoC confirmation T-105)
 - **Date:** 2026-10-28
 - **Deciding task / owner:** Manager — plan.md v1.0.0 §4 (plan status: approved for execution); capability-library mechanism chosen by T-104 (Pending)
 
@@ -12,6 +12,8 @@ Source: plan.md v1.1.0 §4 (ADR-005 — Privilege model — Accepted (mechanism 
 
 > 7. Capability library candidates: `caps` or `capctl` (the latter's last release was March 2024). Chosen in T-104 under §9 criteria; `unsafe` stays forbidden in our own code.
 
+(T-104-FU1 note) Chosen in T-104 and ratified by the Manager (T-104 PQ-1): `caps =0.5.6`; `capctl` not used.
+
 > 8. Rejected: triggering ARP via UDP/TCP connects to every address (touches ports, unreliable, violates §2.3).
 
 ## Decision
@@ -19,8 +21,13 @@ Source: plan.md v1.1.0 §4 (ADR-005 — Privilege model — Accepted (mechanism 
 > 1. The process runs as an unprivileged user. It is never setuid and never re-executes itself through `sudo`.
 > 2. Before the TUI starts, it tries to open one `AF_PACKET` socket bound to the selected interface and `ETH_P_ARP`. This needs `CAP_NET_RAW`, granted to the binary by `setcap cap_net_raw+ep`.
 > 3. After the socket is open, the process **drops its capabilities** (effective, permitted, inheritable, ambient) and sets `no_new_privs`, before it processes any untrusted input. Tests verify `CapEff`/`CapPrm` in `/proc/self/status` are zero afterwards.
+
+(T-104-FU1 note) Implemented by T-104: the drop clears the effective, permitted, inheritable and ambient sets, and additionally narrows the **bounding** set when `CAP_SETPCAP` is held; verification reads `/proc/thread-self/status` and fails closed. When `CAP_SETPCAP` is not held, the residual bounding mask remains, with `NoNewPrivs=1` as the compensating control; this ADR's verification requirement (`CapEff`/`CapPrm` = 0) is met in both cases. Evidence: `docs/reports/T-104/execution-01.md` §4/§6, `docs/reports/T-104/review-01.md` §1.3/§7.
+
 > 4. If the socket cannot be opened (`EPERM`), the app starts in **read-only mode** (neighbor table only) with an actionable message — not an error exit.
 > 5. If started with euid 0, the app warns once ("running as root is not required; use file capabilities") and still drops capabilities.
+
+(T-104-FU1 note) **Owner: T-205** (Manager assignment, T-104-FU1) — the euid-0 warning is not implemented yet.
 
 ## Consequences (positive, negative, follow-ups)
 
@@ -32,3 +39,6 @@ Source: plan.md v1.1.0 §4 (ADR-005 — Privilege model — Accepted (mechanism 
 ## Evidence (links to PoC data, reports, benchmarks)
 
 See plan.md §4 and future reports.
+
+- T-104 execution report — capability-drop implementation and live verification: `docs/reports/T-104/execution-01.md` (§4, §6)
+- T-104 independent review — privilege verification and security assessment: `docs/reports/T-104/review-01.md` (§1.3, §7)
