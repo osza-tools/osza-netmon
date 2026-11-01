@@ -1,0 +1,10 @@
+# Cargo configuration for the fuzz package (task T-103).
+#
+# Keeps this standalone package's build artifacts in the repository's
+# single git-ignored target directory instead of a fuzz-local
+# fuzz/target, so the SPDX CI check (`find . -name '*.rs' -not -path
+# './target/*'`) never scans build output. Only applies when cargo runs
+# with this directory as the working directory.
+
+[build]
+target-dir = "../target"
