@@ -3,6 +3,8 @@ name: CI
 on:
   pull_request:
   push:
+    # T-106 hygiene fix (Manager's health check, 2026-11-02): the value
+    # was `ain]` (broken since T-000), so pushes to main never ran CI.
     branches: [main]
 
 concurrency:
@@ -100,3 +102,33 @@ jobs:
           cache: false
       - name: cargo build --locked at MSRV
         run: cargo build --locked
+
+  netns:
+    name: netns integration (opt-in, user namespaces)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust toolchain (from rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+      # T-106 (plan S11.2): the opt-in namespace suite. Build outside
+      # the wrapper first -- inside the namespace cargo must not need
+      # the network (--locked, warm target dir).
+      - name: Warm build (cargo test --no-run)
+        run: cargo test --locked --all-features --no-run
+      - name: S1-S7 netns suite inside user namespaces
+        run: |
+          set -euo pipefail
+          # Ubuntu 23.10+ restricts unprivileged user namespaces via
+          # AppArmor; GitHub's ubuntu-latest runners ship that default,
+          # which breaks `unshare --user --map-root-user --net`. The
+          # one-line relax below was pre-approved by the Manager
+          # (task card T-106 section 3, health check 2026-11-02); the
+          # suite itself needs no privileges beyond user namespaces.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          unshare --user --map-root-user --net bash -c 'OSZA_NETMON_TESTS=1 cargo test --locked --all-features --test netns -- --test-threads=1 --nocapture'
+      - name: Privileged (ignored) tests in the same wrapper
+        run: |
+          set -euo pipefail
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          unshare --user --map-root-user --net bash -c 'cargo test --locked --all-features -- --ignored'
