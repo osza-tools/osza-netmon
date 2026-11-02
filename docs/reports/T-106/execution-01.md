@@ -20,7 +20,7 @@ Plan §11.2's scenarios S1–S7 are now a reproducible, opt-in integration suite
 | AC-8 S6 egress 100% ARP requests, in scope, within margin | **Met** | `S6: 22 ARP requests out (all in-scope), 0 non-ARP frames, window-max 13 ≤ 110`; every logged scanner frame asserted `et=0x0806 op=1 tip ∈ targets`; count == `requests_sent`; NFR-06 total-margin asserted; lab-internal kernel frames (other sources) counted separately (2) — §6 |
 | AC-9 S7 typed EPERM + read-only entries; post-drop zeros + scan completes | **Met** | `S7(a): open_raw_socket → EPERM without CAP_NET_RAW; read-only path returned exactly 2 lab-learned entries` (child drops CAP_NET_RAW via the approved `caps` crate; CapEff bit 13 verified 0); `S7(b): after the drop CapEff=CapPrm=0, the scan completed and discovered both devices` — §4.4 |
 | AC-10 S8/S9 tables, 3 cycles, JSON+MD, seeds+mechanism, two-run variance | **Met** | §5: 15 cells × 3 cycles = 45 records × 2 runs; `target/netns/measure/netns-measure-run{1,2}.{json,md}`; every record carries its seed and `"impairment_mechanism": "helper responder"`; run-to-run recall/count differences: **0** (§5.3) |
-| AC-11 CI netns job; push trigger fixed; fuzz/target/ ignored | **Met (workflow level)** | `.github/workflows/ci.yml`: new `netns` job (§4.6), trigger `branches: [main]` (§4.7), `.gitignore` += `fuzz/target/`; the job's own green run happens on the PR (this sandbox cannot open the PR's CI) — §5/§10 |
+| AC-11 CI netns job; push trigger fixed; fuzz/target/ ignored | **Met** | PR #12, run 41489186987: all four jobs green — `netns integration (opt-in, user namespaces)` **success** (job 125427386526), plus gates / MSRV / supply-chain; workflow changes in §4.6/§4.7 |
 | AC-12 all §11.3 gates green; zero src/ changes; SPDX everywhere | **Met** | §4.1–§4.2: fmt/clippy/test/doc/audit/deny all exit 0; `git diff --stat` = ci.yml + .gitignore + Cargo.toml (test-target registration), `src/` untouched (§4.8); SPDX check clean (§4.2) |
 | AC-13 grep: no privileged helper, no named-netns registration; RFC 5737; `02:…` MACs | **Met** | `grep -rn -e 'sudo' -e 'ip netns add' tests/ examples/` → no output (§4.5); all lab subnets are 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 slices (RFC 5737); every synthetic MAC is `02:…` (locally administered, asserted by the harness self-check) |
 
@@ -147,6 +147,8 @@ $ grep -rn -e 'sudo' -e 'ip netns add' tests/ examples/
 
 New `netns` job: checkout + pinned toolchain (same action SHAs as the other jobs) → `cargo test --locked --all-features --no-run` (warm build **outside** the wrapper; inside the namespace cargo needs no network) → the §4.4 suite command inside `unshare --user --map-root-user --net` → the §4.4 `--ignored` command inside the same wrapper. The AppArmor relax line (`sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`) is present with the comment the card requires (Ubuntu 23.10+ runners restrict unprivileged user namespaces by default).
 
+Observed on the PR (run `41489186987`): `netns integration (opt-in, user namespaces)` → **success** (job `125427386526`), alongside `fmt / clippy / test / doc / SPDX`, `MSRV build` and `cargo audit / cargo deny`, all success — the relax line proved necessary and sufficient on `ubuntu-latest`.
+
 ### 4.7 Push-trigger hygiene fix
 
 `on.push.branches` carried the literal value `ain]` (broken since T-000 — the card's diagnosis); it is now `[main]` with a comment naming the fix and its origin. Verified by loading the workflow as YAML: `triggers: {'pull_request': None, 'push': {'branches': ['main']}}`.
@@ -248,7 +250,7 @@ None. No production code change was needed (the card's §4 stop condition never 
 
 - **Helper impairment cannot touch kernel-answered devices** (by construction); the S1 measurement rows under P1–P3 describe the helper half (noted per row). A link-level mechanism (`tc netem`, available here — §5.1) can impair both halves; that comparison is T-105's.
 - **The suite must stay serialized** — enforced by the custom runner; the libtest `--test-threads=1` flag is accepted but inert (documented in `main.rs`).
-- **AC-11's "CI green on the PR"** could not be observed from this sandbox (no ability to watch GitHub run the job); the workflow is syntactically valid YAML with the exact commands verified locally (§4.4/§4.6). The plan's AC explicitly allows the documented-local-procedure outcome; the expectation is a green job on the PR.
+- (resolved during review of this report's draft) CI on the PR was observed after submission: all four jobs green, including `netns` (§4.6) — AC-11 needs no local-procedure fallback.
 - **`cpu_ms` in the measurement records** is the whole test process's user+system time around one scan (from `/proc/self/stat`), so it includes harness overhead — informative, not a product benchmark (T-403 owns those).
 - **`sweep_duration_ms`** is "last scanner request − first scanner request (+ one pacing interval) as observed at the responder", so for multi-pass scans it includes the inter-pass gap (visible in the S2 rows: ~3.6 s at P0 vs ~2.6 s of pure sending).
 - **S2's NFR-02 margin:** measured 5.08 s against the 10 s budget (~49% headroom) on this 2-core sandbox; CI runners of the same class should be similar, but the budget is asserted, so a pathological runner would surface as an S2 failure with the actual duration in the message.
