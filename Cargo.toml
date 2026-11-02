@@ -12,6 +12,19 @@ repository = "https://github.com/osza-tools/osza-netmon"
 readme = "README.md"
 license = "GPL-3.0-only"
 publish = false
+# T-106: the network-namespace integration harness (tests/netns/) is a
+# custom test binary (harness = false) because its "responder" and "probe"
+# modes re-exec the same executable with subcommands (std::env::current_exe
+# + `--responder`), which a generated libtest main cannot dispatch. With
+# autotests disabled, every test target is declared explicitly — today that
+# is exactly the one netns target; future test targets must be added here
+# (or the flag revisited by a Plan Question).
+autotests = false
+
+[[test]]
+name = "netns"
+path = "tests/netns/main.rs"
+harness = false
 
 [dependencies]
 # ratatui is pinned to an exact version (plan §9.1); thiserror is a caret
