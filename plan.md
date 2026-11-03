@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Document** | `plan.md` — the single source of truth for this project |
-| **Plan version** | 1.4.0 |
+| **Plan version** | 1.5.0 |
 | **Targets product version** | 0.1.0 (MVP) |
 | **Status** | Approved for execution — Phase 1 in progress (G-0 passed) |
 | **Ecosystem** | osza-tools |
@@ -1023,7 +1023,7 @@ Entry rule: a feature must serve one of the four questions (§1.2) and receive i
 | T-103 | ARP codec | DONE | ACCEPT |
 | T-104 | ARP scanner and privilege handling | DONE | ACCEPT + FOLLOW-UPS (T-104-FU1) |
 | T-105 | PoC measurement and decision report | TODO | — |
-| T-106 | netns integration harness | TODO | — |
+| T-106 | netns integration harness | DONE | ACCEPT (after T-106-RW1; Manager-verified 2026-11-03) |
 | T-201 | Device registry | TODO | — |
 | T-202 | Vendor database | TODO | — |
 | T-203 | Hostname resolver | TODO | — |
@@ -1055,6 +1055,7 @@ Gates: G-0 ☑ · G-1 ☐ · G-2 ☐ · G-3 ☐ · G-4 ☐
 | 1.2.0 | 2026-10-28 | T-001 accepted: `docs/adr/` directory created with 16 ADR files transcribed from §4; `index.md` master index added; `AGENTS.md` updated with decision-log reference; PQ-1 resolved (v1.1.0 statuses authoritative per §0.2 precedence); mechanical fidelity check confirms 87 verbatim quoted sentences. |
 | 1.3.0 | 2026-10-28 | T-002 accepted: `src/model/` primitives delivered (MacAddr, Hostname, DisplayText, Field/Source/Reason, Clock/FakeClock, IPv4 helpers + Ipv4Net caps); 45 tests including std-only LCG property suites. Plan Questions resolved: PQ-1 — `proptest` deferred to T-103, std LCG retained; PQ-2 — `DisplayText` collapses whitespace before stripping non-whitespace controls so word boundaries survive; PQ-3 — empty-after-sanitization rejected (`ValidationError::DisplayTextEmpty`), absence modeled via `Field`. PR #5 merged; PR #6 retained as enforcement proof (never merged). |
 | 1.4.0 | 2026-11-02 | Phase 0 closed: T-000/T-001/T-002 accepted, **G-0 passed**. Phase 1 progress: T-101 (ADR-017), T-102, T-103 accepted; T-104 accepted with follow-ups after independent review (all gates re-run, privileged tests in a user namespace, live two-namespace lab reproduced, /29 differential proved the pass-2 filter). PQ-1 ratified: `pnet_datalink =0.35.0` + `caps =0.5.6` + `nix/process`, interim and contained behind `ArpTransport`; ADR-009 stays Pending for T-105. PQ-2 (`MAX_PASSES=3`) and PQ-3 (event-type placement) accepted. Manager card defects corrected on the record: the transport ADR vehicle is ADR-009 (not a new ADR-018), the `ArpTransport` trait needs no `cancel` method, and `discovery` must not depend on `net`. ADR-005 item 5 assigned to T-205; review F-5 to T-403; F-6 and the `ETH_P_ALL` cost to T-105. |
+| 1.5.0 | 2026-11-03 | T-106 attempt 01 reviewed by the Manager: all gates re-run green on the pinned toolchain; the netns suite reproduced 12/12 in 38 s; the S8/S9 measurement reproduced cell-for-cell (45 records, zero variance); scope clean (src/, Cargo.lock untouched); the .gitignore fix verified. One finding (F-1) — the on.push.branches value `ain]` believed to survive in the committed tree despite the fix claimed by commit 7cead63 and report §4.7 — was REFUTED by T-106-RW1 committed-blob verification: no blob of `.github/workflows/ci.yml` in main's history ever contained `branches: ain]` (`ba892fe`…`78717ab` all carry `branches: [main]`; blob `0da304ad304b32e6b788c9ffef01b1b5ff599cd9`, sha256 `24c417f03893c6475fcc9d7a7157450e14bbf970701a7562a8c32c509f92a2c0`), and GitHub push-event CI succeeded on every merge to main since PR #1 (run `41497733912` on `78717ab`) — every `ain]` sighting was the known [m-sequence transport corruption striking display output (the two bytes 0x5B 0x6D are dropped), never a commit; attempt 01's §4.7 stands. T-106-RW1 records the evidence in the report addendum and hardens §6: bracket-bearing files are verified post-commit by object hashes and in-band substring counts, never by displayed output. T-106 accepted on RW1 landing. The S8/S9 tables and the harness LabSpec become the measurement base for T-105 (card issued). |
 
 ---
 

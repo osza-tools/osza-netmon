@@ -262,3 +262,131 @@ None. No production code change was needed (the card's §4 stop condition never 
 3. When cargo/libtest grows a stable way to mix a custom main with a generated harness, the runner could go back to libtest and drop the `#![allow]` block (the scenario functions need no changes).
 4. `docs/limitations.md` and the ADR-009/010/011 decisions remain with T-105 per the card's out-of-scope list.
 5. The CI `netns` job currently rebuilds without caching (the repo pins its actions deliberately); a caching task would be a separate, approved change.
+
+---
+
+## Attempt 02 addendum (T-106-RW1)
+
+*2026-11-03 · Executor: E-Vex · Card T-106-RW1 (T-106 card §3, plan §14.7 verdicts / §14.8 report accuracy) · Base: `main` @ `78717ab` · One commit, amended once before push (§D).*
+
+### A. The F-1 premise, examined against the committed blobs — refuted
+
+The card's premise (Manager review 2026-11-03, finding F-1): the committed tree at `7cead63..b3bb40c` "still contains branches: ain]" — the fix claimed by §4.7 was never committed — so RW1 was to deliver the one-line change. Verification with transport-immune evidence (§B explains why displayed output cannot be trusted for this file) shows the premise does not hold:
+
+| Commit | ci.yml blob (git object) | `branches: ain]` | `branches: [main]` |
+|---|---|---|---|
+| `ba892fe` — T-000: add CI workflow | `7f3cfe45b839661042d2a1b395cecb248e387f1b` | 0 | 1 |
+| `7cead63` — T-106 hygiene fixes | `0da304ad304b32e6b788c9ffef01b1b5ff599cd9` | 0 | 1 |
+| `b3bb40c` — PR #12 head | `0da304ad304b32e6b788c9ffef01b1b5ff599cd9` | 0 | 1 |
+| `78717ab` — main (merge of PR #12) | `0da304ad304b32e6b788c9ffef01b1b5ff599cd9` | 0 | 1 |
+
+1. **No committed blob of this file has ever contained `branches: ain]`.** The push filter has been `branches: [main]` since T-000 created the workflow; `7cead63` added the netns job and the two comment lines without changing the value. Both historical blobs parse (in-process) to `push.branches = ['main']`.
+2. **Working tree = committed blob** at `78717ab`: `git hash-object --no-filters .github/workflows/ci.yml` = `git ls-tree HEAD` = `0da304ad304b32e6b788c9ffef01b1b5ff599cd9`; content sha256 `24c417f03893c6475fcc9d7a7157450e14bbf970701a7562a8c32c509f92a2c0`.
+3. **GitHub's object database agrees**: the contents API at ref=main returns blob `0da304ad…`, whose base64-decoded content contains `branches: [main]` (1) and `branches: ain]` (0).
+4. **GitHub's engine proves the trigger works**: push-event CI run `41497733912` (success) fired on main @ `78717ab` — impossible had the committed filter been `ain]`. Push-event runs succeeded on every merge to main since PR #1 (`40549683908` … `41497733912`, 13/13), so the committed comment's "pushes to main never ran CI" is not borne out by the run history. (PR #12 was merged 2026-11-02T18:08:30Z, before the 2026-11-03 review; RW1 therefore lands on `main`, not the PR branch.)
+
+**Conclusion: there is no one-line change to deliver — the fix was never missing.** The file is left byte-identical.
+
+### B. What the corruption actually is — a display-transport artifact
+
+The "[m-sequence transport corruption" is real, but it strikes text as displayed to an agent, not git objects. Characterization (each string printed through this executor's command transport; true value verified in-process by length):
+
+| True bytes | Received as | Dropped |
+|---|---|---|
+| `x[mz` (4) | `xz` | `[m` |
+| `[main]` (6) | `ain]` | `[m` |
+| `x[main]z` (8) | `xain]z` | `[m` |
+| `x[mmz` (5) | `xmz` | one `[m` |
+| `['main']` (8) | `['main']` | none — survives (`[` followed by `'`) |
+| `x[Mz` (4) | `x[Mz` | none — case-sensitive |
+
+- The two-byte sequence `0x5B 0x6D` is dropped from displayed output; everything else passes.
+- Pipes, files, and git objects are clean: `git show HEAD:.github/workflows/ci.yml | grep -n 'branches:' > file` writes a file whose bytes contain `branches: [main]` (verified in-process); only the on-screen echo loses the sequence. T-000's blob shows the trap perfectly: parsed in-process it yields `push.branches = ['main']` while its displayed text reads `branches: ain]`.
+- All three prior `ain]` sightings (the T-000-era diagnosis, the 2026-11-02 health check preserved in the committed comment lines, and F-1) are explained by this one mechanism.
+
+**Hardened §6 discipline (binding for future tasks):** post-commit verification of any file containing bracket sequences must use transport-immune evidence — git object hashes (hex), sha256 (hex), and in-band substring counts computed by a script that prints only integers/hex/booleans. `git show HEAD:<path>` *viewed through an agent transport* is not sufficient: the verification itself gets corrupted. This addendum applies that standard throughout.
+
+### C. §4.7 stands; the record corrected here is F-1
+
+Attempt 01's §4.7 is accurate for the committed tree: the value is `[main]`, and its YAML verification quote (`triggers: {'pull_request': None, 'push': {'branches': ['main']}}`) is reproducible (§E.3). No correction to §4.7 is needed; the correction this addendum delivers is to F-1 and to the belief that a fix was missing. Per the card, the two comment lines above the trigger are left exactly as committed (they describe a "fix" of a defect that, per §A, never existed in the tree; they stand as history).
+
+### D. What RW1 changed (and did not change)
+
+| File | Change |
+|---|---|
+| `.github/workflows/ci.yml` | **unchanged** — there is nothing to fix (§A); any edit would fabricate a diff against the verified baseline |
+| `docs/reports/T-106/execution-01.md` | this addendum only |
+| `plan.md` | the Manager's v1.5.0 dictation with one disclosed deviation: header row → 1.5.0 (bold label preserved as in the existing table); T-106 status-board row verbatim; changelog row appended with **only the F-1 passage replaced by the §A findings** — the dictated F-1 wording recorded the fix as missing-and-delivered, which §A refutes. Everything else in the row (review results, acceptance, T-105 hand-off) is verbatim |
+
+Procedure (per the card's §6, hardened per §B): all changes were committed first; the §5 set (§E) was run against the committed HEAD both before the RW1 commit (`78717ab`) and after it — identical outputs, the ci.yml object being the same (`0da304ad…`); the post-commit §6 checks (§F) were run against the committed HEAD, appended, and the commit was amended once, before push — no published history rewritten (`78717ab` and earlier untouched; the amend only adds §F to this file). Every check was re-run on the final HEAD with identical results. The RW1 commit's own hash necessarily postdates this file's content; it is reported in the delivery message and the PR. No Rust file was touched: `git diff --name-only 78717ab..HEAD` = `docs/reports/T-106/execution-01.md`, `plan.md`; `src/` and `Cargo.lock` are byte-identical; `cargo fmt --check` exits 0 on the pinned toolchain (§E.5).
+
+### E. §5 verification outputs (committed tree)
+
+Commands run against `HEAD` (the RW1 commit; ci.yml is the same object as at `78717ab` — `0da304ad…`). Outputs below are the true tee'd bytes (in-process-verified); where the same bytes display differently through a corrupted transport, that is noted.
+
+**1. `git show HEAD:.github/workflows/ci.yml | grep -n 'branches:'`** — exactly one match:
+
+```text
+8:    branches: [main]
+```
+
+(Through a transport that drops `0x5B 0x6D`, this line displays as `8:    branches: ain]` — §B. The bytes above are the true output.)
+
+**2. `git show HEAD:.github/workflows/ci.yml | grep -c 'ain]'`**:
+
+```text
+2
+```
+
+As the card expects. Attribution (in-process, by line): line 7 — the committed comment containing `` `ain]` `` — and line 8 — the substring `ain]` inside `[main]`. The card's parenthetical ("only the two comment-line occurrences") is imprecise: only line 7 is a comment. "Zero elsewhere" holds for the corrupted value as a setting:
+
+```text
+$ git show HEAD:.github/workflows/ci.yml | grep -c 'branches: ain]'
+0
+```
+
+(grep exit 1 — no matches.)
+
+**3. The card's exact command** fails on YAML 1.1 boolean keys (PyYAML parses a bare `on` key as `True`; the file's top-level keys are `name`, `True`, `concurrency`, `permissions`, `env`, `jobs`):
+
+```text
+$ git show HEAD:.github/workflows/ci.yml | python3 -c "import sys,yaml;print(yaml.safe_load(sys.stdin)['on']['push']['branches'])"
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+KeyError: 'on'
+```
+
+Bool-key-aware form:
+
+```text
+$ git show HEAD:.github/workflows/ci.yml | python3 -c "import sys,yaml;d=yaml.safe_load(sys.stdin);print(d.get('on',d.get(True))['push']['branches'])"
+['main']
+```
+
+**4. `sha256sum .github/workflows/ci.yml`** (working tree) and the committed blob:
+
+```text
+$ sha256sum .github/workflows/ci.yml
+24c417f03893c6475fcc9d7a7157450e14bbf970701a7562a8c32c509f92a2c0  .github/workflows/ci.yml
+$ git show HEAD:.github/workflows/ci.yml | sha256sum
+24c417f03893c6475fcc9d7a7157450e14bbf970701a7562a8c32c509f92a2c0  -
+```
+
+(working tree = committed blob; git object sha `0da304ad304b32e6b788c9ffef01b1b5ff599cd9`.)
+
+**5. `cargo fmt --check`** — pinned toolchain (`rust-toolchain.toml` 1.99.1; cargo 1.99.1 / rustfmt 1.10.0-stable):
+
+```text
+$ cargo fmt --check
+(no output; exit 0)
+```
+
+### F. Post-commit §6 verification (transport-immune; final HEAD)
+
+Run against the committed HEAD after the RW1 commit, and re-run identically after the pre-push amend that added this section (`plan.md` and `.github/workflows/ci.yml` are untouched by the amend, so every value below holds for the final HEAD):
+
+- `git show HEAD:plan.md | sha256sum` = `358afe3a5d6a4e0687e9185c89a403e7237236d6ea32de2b7ee0b8dc51bce3bf`, equal to the working-tree `sha256sum plan.md` — the bracket-bearing plan edits are verified in the committed object, not just on disk.
+- In-band counts on the committed `plan.md` blob (script output, integers only): `| **Plan version** | 1.5.0 |` ×1 (the 1.4.0 row ×0); the T-106 status row `| T-106 | netns integration harness | DONE | ACCEPT (after T-106-RW1; Manager-verified 2026-11-03) |` ×1; `| 1.5.0 | 2026-11-03 |` ×1; `REFUTED by T-106-RW1 committed-blob verification` ×1; `T-106 accepted on RW1 landing.` ×1; `The S8/S9 tables and the harness LabSpec become the measurement base for T-105 (card issued). |` ×1; within the F-1 passage, the quoted refuted value `branches: ain]` ×1 and the verified value `branches: [main]` ×1; `| 1.4.0 | 2026-11-02 |` ×1 (the prior row intact).
+- `git ls-tree HEAD .github/workflows/ci.yml` = blob `0da304ad304b32e6b788c9ffef01b1b5ff599cd9` — the byte-identical object already verified at `78717ab` (§A); in-band counts on the committed blob: `branches: ain]` ×0, `branches: [main]` ×1 (§E.1/§E.2b).
+- `git status --porcelain` — clean; `git diff --name-only 78717ab..HEAD` = `docs/reports/T-106/execution-01.md`, `plan.md` (no other file touched; `src/` and `Cargo.lock` byte-identical).
+- This report file is itself bracket-bearing; a committed-blob digest of a file cannot be embedded inside that same file (self-reference). Its verification travels in the delivery message and the PR, both of which carry the immune evidence of §A/§E/§F.
