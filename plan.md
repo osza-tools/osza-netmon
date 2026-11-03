@@ -1024,7 +1024,7 @@ Entry rule: a feature must serve one of the four questions (§1.2) and receive i
 | T-104 | ARP scanner and privilege handling | DONE | ACCEPT + FOLLOW-UPS (T-104-FU1) |
 | T-105 | PoC measurement and decision report | DONE | ACCEPT |
 | T-106 | netns integration harness | DONE | ACCEPT (after T-106-RW1; Manager-verified 2026-11-03) |
-| T-201 | Device registry | TODO | — |
+| T-201 | Device registry | DONE | — (execution 01 submitted 2026-11-03, review pending) |
 | T-202 | Vendor database | TODO | — |
 | T-203 | Hostname resolver | TODO | — |
 | T-204 | Discovery orchestrator and scheduler | TODO | — |

@@ -23,10 +23,15 @@
 //! SR-05): the 42-byte Ethernet+ARP request builder and the total,
 //! solicited-only reply validator — still pure byte manipulation with
 //! no socket I/O; the transport is T-104, behind the pending ADR-009.
+//!
+//! Task T-201 adds the [`registry`]: the in-memory device registry —
+//! the single source of truth for the application state (`plan.md`
+//! §6.4 FR-RG-01…07, ADR-007 aging, ADR-008 identity/shared-MAC).
 
 pub mod discovery;
 pub mod model;
 pub mod net;
+pub mod registry;
 
 use std::ffi::OsString;
 
