@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Offline vendor-name lookup backed by an embedded, IEEE-OUI-derived
+//! Vendor-name lookup backed by an embedded, IEEE-OUI-derived
 //! database (plan §6.5 FR-EN-01/FR-EN-02, task T-202).
 //!
-//! The database is built offline by the maintainer CLI
+//! The database is built ahead of time by the maintainer CLI
 //! `examples/gen_oui.rs` from the four public IEEE registry CSVs — MA-L
 //! (24-bit prefixes), MA-M (28-bit), MA-S (36-bit) and the legacy IAB
 //! (36-bit) — applying the T-202 task-card data policies D-1…D-9 (merge
@@ -610,7 +610,7 @@ impl VendorDb {
 
         // The counts are now bounded by the image length (each table fits
         // exactly between its validated offsets), so sizing allocations
-        // from them is safe.
+        // from them cannot over-allocate on hostile input.
         let mut table24: Vec<Row> = Vec::with_capacity(count_mal as usize);
         let mut table28: Vec<Row> = Vec::with_capacity(count_mam as usize);
         let mut table36: Vec<Row> = Vec::with_capacity(n36 as usize);

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-//! Enrichment: offline device-attribute lookups (plan §6.5).
+//! Enrichment: no-network device-attribute lookups (plan §6.5).
 //!
 //! The enrichment layer turns observed identifiers into the informational
 //! columns of the device list — vendor names and (with T-203) hostnames —

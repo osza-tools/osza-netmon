@@ -7,9 +7,9 @@ on every database refresh.
 
 ## Purpose
 
-`data/oui/vendor-db.bin` is the compact, offline vendor-name database
-embedded by `src/enrichment/vendor.rs` (`include_bytes!`) and served by
-`VendorDb::lookup` (FR-EN-01: longest-prefix match 36 → 28 → 24 bits;
+`data/oui/vendor-db.bin` is the compact, embedded vendor-name database
+served by `src/enrichment/vendor.rs` (`include_bytes!`, no network access)
+through `VendorDb::lookup` (FR-EN-01: longest-prefix match 36 → 28 → 24 bits;
 locally-administered MACs answered before any table access). It is built
 from the four public IEEE registry CSVs by `examples/gen_oui.rs`. The
 format (magic `OZOUDB`, version 1) is documented in the `vendor` module
