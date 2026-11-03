@@ -376,10 +376,47 @@ impl<'a> ArpReplyContext<'a> {
 /// assert_eq!(frame[41], 10);
 /// ```
 pub fn build_arp_request(our_mac: MacAddr, our_ip: Ipv4Addr, target_ip: Ipv4Addr) -> Vec<u8> {
+    // The broadcast sweep (FR-DS-03): everyone on the link is asked.
+    build_arp_request_raw(ETHERNET_BROADCAST, our_mac, our_ip, target_ip)
+}
+
+/// Builds one ARP request frame addressed to one specific **unicast**
+/// Ethernet destination (the T-105 unicast-refresh experimental toggle).
+///
+/// Same wire format as [`build_arp_request`] with one difference: the
+/// Ethernet destination is `eth_dst` instead of the broadcast. `MacAddr`
+/// only ever holds valid unicast addresses (the T-002 boundary
+/// constructor rejects multicast/broadcast), so a broadcast cannot be
+/// built through this path by construction.
+///
+/// T-105 (plan §4 ADR-011) evaluates "unicast ARP refresh of known
+/// devices": re-probing an already-known `(MAC, IP)` directly instead of
+/// re-broadcasting. The reply to such a request is validated by the
+/// same [`parse_arp_reply`] conditions as any other reply (its Ethernet
+/// destination is still our MAC — condition 7 — because the responder
+/// answers to the requester).
+pub fn build_arp_request_to(
+    eth_dst: MacAddr,
+    our_mac: MacAddr,
+    our_ip: Ipv4Addr,
+    target_ip: Ipv4Addr,
+) -> Vec<u8> {
+    build_arp_request_raw(eth_dst.octets(), our_mac, our_ip, target_ip)
+}
+
+/// The shared byte assembly of every request frame (broadcast and
+/// unicast variants): fixed fields, one after another, always exactly
+/// [`ARP_FRAME_LEN`] bytes.
+fn build_arp_request_raw(
+    eth_dst: [u8; 6],
+    our_mac: MacAddr,
+    our_ip: Ipv4Addr,
+    target_ip: Ipv4Addr,
+) -> Vec<u8> {
     let mut frame = Vec::with_capacity(ARP_FRAME_LEN);
-    // Ethernet header (Appendix E): broadcast destination, our source,
-    // EtherType ARP.
-    frame.extend_from_slice(&ETHERNET_BROADCAST);
+    // Ethernet header (Appendix E): destination, our source, EtherType
+    // ARP.
+    frame.extend_from_slice(&eth_dst);
     frame.extend_from_slice(&our_mac.octets());
     frame.extend_from_slice(&ETHERTYPE_ARP.to_be_bytes());
     // ARP payload: Ethernet hardware, IPv4 protocol, 6+4 octet
@@ -915,6 +952,34 @@ mod tests {
         let b = build_arp_request(mac(OUR_MAC), ip(OUR_IP), ip(PEER_IP_2));
         assert_eq!(a, build_arp_request(mac(OUR_MAC), ip(OUR_IP), ip(PEER_IP)));
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn unicast_request_builder_replaces_only_the_ethernet_destination() {
+        // T-105's unicast-refresh toggle: same 42-byte layout, one field
+        // different — the Ethernet destination is the known device's
+        // MAC, everything else matches the broadcast request.
+        let broadcast = build_arp_request(mac(OUR_MAC), ip(OUR_IP), ip(PEER_IP));
+        let unicast = build_arp_request_to(mac(PEER_MAC), mac(OUR_MAC), ip(OUR_IP), ip(PEER_IP));
+        assert_eq!(unicast.len(), ARP_FRAME_LEN);
+        assert_eq!(unicast[0..6].to_vec(), PEER_MAC.to_vec());
+        // The only difference is the destination; bytes 6..42 identical.
+        assert_eq!(unicast[6..].to_vec(), broadcast[6..].to_vec());
+        // Round trip through the harness-style request view: the
+        // unicast frame is still a well-formed ARP request.
+        assert_eq!(unicast[12..14], [0x08, 0x06]); // EtherType ARP
+        assert_eq!(unicast[20..22], [0x00, 0x01]); // opcode request
+        assert_eq!(unicast[28..32].to_vec(), OUR_IP.to_vec()); // sender IP
+        assert_eq!(unicast[38..42].to_vec(), PEER_IP.to_vec()); // target IP
+    }
+
+    #[test]
+    fn unicast_request_cannot_encode_a_broadcast_destination() {
+        // MacAddr rejects multicast (first octet bit 0), so the
+        // broadcast ff:ff:ff:ff:ff:ff cannot reach the unicast builder —
+        // the type system keeps the broadcast sweep on
+        // build_arp_request's path by construction.
+        assert!(MacAddr::from_octets([0xff; 6]).is_err());
     }
 
     // -----------------------------------------------------------------------

@@ -30,7 +30,7 @@ pub mod worker;
 
 pub use codec::{
     ARP_FRAME_LEN, ArpReply, ArpReplyContext, ArpReplyCounters, InvalidReply, build_arp_request,
-    parse_arp_reply,
+    build_arp_request_to, parse_arp_reply,
 };
 pub use scanner::{
     ArpScanner, DEFAULT_LISTEN_WINDOW, DEFAULT_PASS_GAP, DEFAULT_RATE_PPS, DEFAULT_RESPONSE_CAP,

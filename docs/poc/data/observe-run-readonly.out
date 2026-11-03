@@ -1,0 +1,7 @@
+osza-netmon PoC discovery (no TUI)
+interface: v-o1a (mac <redacted-random-lab-mac>, ip 192.0.2.1/24, scope 192.0.2.0/24)
+privileges after drop: CapInh=0000000000000000 CapPrm=0000000000000000 CapEff=0000000000000000 CapBnd=0000000000000000 CapAmb=0000000000000000 NoNewPrivs=1
+neighbor table: 1 entrie(s)
+mode: read-only (no ARP sweep)
+192.0.2.2 <redacted-random-lab-mac> (neighbor table)
+summary: read-only cycle, 1 neighbor-table observation(s)
