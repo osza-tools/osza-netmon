@@ -274,6 +274,11 @@ pub struct ArpScanner {
     scope: Ipv4Net,
     our_mac: MacAddr,
     our_ip: Ipv4Addr,
+    /// The IPv4 address announced as the ARP *sender* in every request
+    /// (T-105 experimental toggle). `None` (the default, ADR-011) = the
+    /// interface's own address; `Some(Ipv4Addr::UNSPECIFIED)` produces
+    /// RFC 5227-style probes that claim `0.0.0.0`.
+    probe_sender_ip: Option<Ipv4Addr>,
     pass_gap: Duration,
     response_cap: usize,
 }
@@ -292,9 +297,27 @@ impl ArpScanner {
             scope,
             our_mac,
             our_ip,
+            probe_sender_ip: None,
             pass_gap: DEFAULT_PASS_GAP,
             response_cap: DEFAULT_RESPONSE_CAP,
         }
+    }
+
+    /// Overrides the IPv4 address announced as the ARP sender in every
+    /// request (T-105 toggle; plan §4 ADR-011 evaluates interface IP vs
+    /// `0.0.0.0`, the RFC 5227 probe form).
+    ///
+    /// Scope facts stay on the interface's identity: target
+    /// generation still excludes the interface's own address, and
+    /// reply validation (FR-DS-06 conditions 7–12, including the
+    /// own-address rejection) still compares against the interface's
+    /// MAC/IP — only the announced sender field of outgoing requests
+    /// changes. Replies to `0.0.0.0` probes address the requester by
+    /// MAC (their ARP target IP carries the claimed `0.0.0.0`, a field
+    /// with no validation weight per T-103).
+    pub fn with_probe_sender_ip(mut self, sender_ip: Ipv4Addr) -> Self {
+        self.probe_sender_ip = Some(sender_ip);
+        self
     }
 
     /// Overrides the inter-pass gap (default 1 s, ADR-011). Test/tuning
@@ -452,7 +475,8 @@ impl ArpScanner {
                 if pass == 1 {
                     pass1_attempts += 1;
                 }
-                let frame = build_arp_request(self.our_mac, self.our_ip, target);
+                let sender_ip = self.probe_sender_ip.unwrap_or(self.our_ip);
+                let frame = build_arp_request(self.our_mac, sender_ip, target);
                 match self.transport.send(&frame) {
                     Ok(()) => report.requests_sent += 1,
                     Err(err) if err.is_fatal() => {
@@ -561,6 +585,7 @@ impl fmt::Debug for ArpScanner {
             .field("scope", &self.scope)
             .field("our_mac", &self.our_mac)
             .field("our_ip", &self.our_ip)
+            .field("probe_sender_ip", &self.probe_sender_ip)
             .field("pass_gap", &self.pass_gap)
             .field("response_cap", &self.response_cap)
             .field("transport", &"dyn ArpTransport")
@@ -1009,6 +1034,60 @@ mod tests {
             result.elapsed
         );
         assert_eq!(fake.sent_log().len(), 5);
+    }
+
+    #[test]
+    fn probe_sender_ip_override_changes_the_announced_sender_only() {
+        // T-105's RFC 5227 toggle: with `0.0.0.0` announced, every sent
+        // request carries the unspecified sender, the interface's own
+        // address is still excluded from the targets, and the auto
+        // responder's replies (addressed to our MAC, targeting the
+        // interface IP — a field with no validation weight) still
+        // validate and count.
+        let fake = FakeTransport::new();
+        for host in 2u8..=6 {
+            fake.responder(
+                addr([192, 0, 2, host]),
+                format!("02:00:00:00:00:{:02x}", host)
+                    .parse()
+                    .expect("valid MAC"),
+            );
+        }
+        let scanner = ArpScanner::new(
+            Box::new(fake.clone()),
+            net([192, 0, 2, 0], 29),
+            our_mac(),
+            addr([192, 0, 2, 1]),
+        )
+        .with_probe_sender_ip(Ipv4Addr::UNSPECIFIED)
+        .with_pass_gap(Duration::from_millis(20));
+        let result = scanner.scan(
+            1,
+            DEFAULT_RATE_PPS,
+            Duration::from_millis(60),
+            never_cancel(),
+        );
+        assert_eq!(result.outcome, ScanOutcome::Complete);
+        assert_eq!(result.observations.len(), 5);
+        assert_eq!(result.counters.replies_accepted, 5);
+        assert_eq!(result.counters.replies_rejected, 0);
+        let sent = fake.sent_log();
+        assert_eq!(sent.len(), 5);
+        for (_at, frame) in &sent {
+            // ARP sender IP at offsets 28..32: 0.0.0.0 everywhere.
+            assert_eq!(
+                frame.get(28..32),
+                Some(&[0, 0, 0, 0][..]),
+                "frame must announce the unspecified sender"
+            );
+            // The ARP target IP at 38..42 is still a /29 host, never
+            // our own interface address.
+            let target = frame
+                .get(38..42)
+                .and_then(|bytes| bytes.last().copied())
+                .unwrap_or(0);
+            assert!((2..=6).contains(&target), "bad target host byte {target}");
+        }
     }
 
     // ---- pacing (AC-3) ------------------------------------------------------
