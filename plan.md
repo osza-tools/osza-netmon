@@ -1025,7 +1025,7 @@ Entry rule: a feature must serve one of the four questions (§1.2) and receive i
 | T-105 | PoC measurement and decision report | DONE | ACCEPT |
 | T-106 | netns integration harness | DONE | ACCEPT (after T-106-RW1; Manager-verified 2026-11-03) |
 | T-201 | Device registry | DONE | ACCEPT |
-| T-202 | Vendor database | TODO | — |
+| T-202 | Vendor database | DONE | — (execution 01 submitted 2026-11-04, review pending) |
 | T-203 | Hostname resolver | TODO | — |
 | T-204 | Discovery orchestrator and scheduler | TODO | — |
 | T-205 | Application core (headless) | TODO | — |

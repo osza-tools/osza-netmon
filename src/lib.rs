@@ -27,8 +27,18 @@
 //! Task T-201 adds the [`registry`]: the in-memory device registry —
 //! the single source of truth for the application state (`plan.md`
 //! §6.4 FR-RG-01…07, ADR-007 aging, ADR-008 identity/shared-MAC).
+//!
+//! Task T-202 adds the [`enrichment`] layer: the embedded vendor database
+//! (`enrichment::vendor`, `plan.md` §6.5 FR-EN-01/FR-EN-02) — an offline,
+//! IEEE-OUI-derived lookup with longest-prefix match (36 → 28 → 24 bits),
+//! locally-administered MACs answered before any table access, names
+//! sanitized through `DisplayText` at load time (FR-EN-04), and the
+//! database date exposed for the help screen. The maintainer CLI
+//! `examples/gen_oui.rs` regenerates the committed image under
+//! `data/oui/`.
 
 pub mod discovery;
+pub mod enrichment;
 pub mod model;
 pub mod net;
 pub mod registry;
