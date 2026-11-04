@@ -20,7 +20,7 @@ Status vocabulary (plan.md §4): **Accepted** · **Provisional** (accepted, owne
 | 012 | Concurrency: std threads, no async runtime | Accepted | [012-concurrency-model.md](012-concurrency-model.md) |
 | 013 | Persistence: none, except the notice acknowledgment | Accepted | [013-persistence-model.md](013-persistence-model.md) |
 | 014 | Project license | Accepted (variant to confirm, O-7) | [014-project-license.md](014-project-license.md) |
-| 015 | DNS PTR client implementation | Pending (T-203) | [015-dns-ptr-client.md](015-dns-ptr-client.md) |
+| 015 | DNS PTR client implementation | Pending (T-203 evidence delivered; Manager ratification with the task decision) | [015-dns-ptr-client.md](015-dns-ptr-client.md) |
 | 016 | CI provider: GitHub Actions | Accepted | [016-ci-provider.md](016-ci-provider.md) |
 | 017 | Interface data source (`getifaddrs` via `nix`) | Accepted (PQ-1 resolved by Manager decision, 2026-10-31) | [017-interface-data-source.md](017-interface-data-source.md) |
 
