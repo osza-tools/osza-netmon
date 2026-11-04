@@ -42,6 +42,17 @@ osza-netmon = { path = ".." }
 name = "arp_frame"
 path = "arp_frame.rs"
 
+# T-203 (R-8): the DNS PTR response acceptance path and the resolv.conf
+# parser + resolver-selection core, same std-only deterministic pattern
+# as arp_frame.rs.
+[[bin]]
+name = "dns_response"
+path = "dns_response.rs"
+
+[[bin]]
+name = "resolv_conf"
+path = "resolv_conf.rs"
+
 # The same never-panic discipline as the root package (plan §7 SR-01/
 # SR-02). The print lints stay denied too; arp_frame.rs carries the one
 # narrowly scoped allow on `main` — a fuzz *binary* reports its own
