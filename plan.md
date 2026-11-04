@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Document** | `plan.md` — the single source of truth for this project |
-| **Plan version** | 1.7.0 |
+| **Plan version** | 1.8.0 |
 | **Targets product version** | 0.1.0 (MVP) |
 | **Status** | Approved for execution — Phase 2 in progress (G-0, G-1 passed) |
 | **Ecosystem** | osza-tools |
@@ -1008,6 +1008,7 @@ Entry rule: a feature must serve one of the four questions (§1.2) and receive i
 | O-6 | Confirm first-run-only full notice (ADR-004) | Open | T-302 | as stated in ADR-004 |
 | O-7 | `GPL-3.0-only` or `GPL-3.0-or-later` | Open | T-000 | `GPL-3.0-only` |
 | O-8 | Repository settings (Owner action): protect `main` (require PR + passing CI), enable Dependabot/security alerts and private vulnerability reporting | Open | T-000 | recommended, not enforced |
+| O-9 | IEEE registry-data redistribution terms (T-202 PQ-1): seek written permission from the IEEE Registration Authority for redistributing the derived vendor database, or explicitly accept the residual risk with attribution | Open | T-405 (before 0.1.0) | Keep the embedded DB with attribution; record the open question in docs/limitations.md |
 
 ---
 
@@ -1022,10 +1023,10 @@ Entry rule: a feature must serve one of the four questions (§1.2) and receive i
 | T-102 | Neighbor table reader | DONE | ACCEPT |
 | T-103 | ARP codec | DONE | ACCEPT |
 | T-104 | ARP scanner and privilege handling | DONE | ACCEPT + FOLLOW-UPS (T-104-FU1) |
-| T-105 | PoC measurement and decision report | DONE | ACCEPT |
+| T-105 | PoC measurement and decision report | DONE | ACCEPT (v1.6.0; branch merge recovered via T-203 commit 0 — F-4, v1.8.0) |
 | T-106 | netns integration harness | DONE | ACCEPT (after T-106-RW1; Manager-verified 2026-11-03) |
 | T-201 | Device registry | DONE | ACCEPT |
-| T-202 | Vendor database | DONE | — (execution 01 submitted 2026-11-04, review pending) |
+| T-202 | Vendor database | DONE | ACCEPT (Manager-verified 2026-11-05) |
 | T-203 | Hostname resolver | TODO | — |
 | T-204 | Discovery orchestrator and scheduler | TODO | — |
 | T-205 | Application core (headless) | TODO | — |
@@ -1058,6 +1059,7 @@ Gates: G-0 ☑ · G-1 ☑ · G-2 ☐ · G-3 ☐ · G-4 ☐
 | 1.5.0 | 2026-11-03 | T-106 attempt 01 reviewed by the Manager: all gates re-run green on the pinned toolchain; the netns suite reproduced 12/12 in 38 s; the S8/S9 measurement reproduced cell-for-cell (45 records, zero variance); scope clean (src/, Cargo.lock untouched); the .gitignore fix verified. One finding (F-1) — the on.push.branches value `ain]` believed to survive in the committed tree despite the fix claimed by commit 7cead63 and report §4.7 — was REFUTED by T-106-RW1 committed-blob verification: no blob of `.github/workflows/ci.yml` in main's history ever contained `branches: ain]` (`ba892fe`…`78717ab` all carry `branches: [main]`; blob `0da304ad304b32e6b788c9ffef01b1b5ff599cd9`, sha256 `24c417f03893c6475fcc9d7a7157450e14bbf970701a7562a8c32c509f92a2c0`), and GitHub push-event CI succeeded on every merge to main since PR #1 (run `41497733912` on `78717ab`) — every `ain]` sighting was the known [m-sequence transport corruption striking display output (the two bytes 0x5B 0x6D are dropped), never a commit; attempt 01's §4.7 stands. T-106-RW1 records the evidence in the report addendum and hardens §6: bracket-bearing files are verified post-commit by object hashes and in-band substring counts, never by displayed output. T-106 accepted on RW1 landing. The S8/S9 tables and the harness LabSpec become the measurement base for T-105 (card issued). |
 | 1.6.0 | 2026-11-03 | Phase 1 closed: T-105 accepted, **G-1 passed**. 633 PoC measurement runs executed against the T-106 harness (543 campaign + 90 baseline, zero variance). Gate G-1 criteria met with margin (worst gated cell 99.2% recall; defaults 100%). ADR-009 (transport) Accepted: `pnet_datalink 0.35.0` final, `ETH_P_ALL` software-filter cost measured at ≤1.8 µs/frame. ADR-010 (neighbor source) Accepted: `/proc/net/arp` retained, netlink states don't map to cycle-aging. ADR-011 (probe strategy) Accepted and re-pinned from data: 100 pps, 2 passes initial / 1 pass periodic, interface IP sender, unicast refresh rejected due to MAC-rotation blindness. Phase 2 (Core) begins. |
 | 1.7.0 | 2026-11-04 | Phase 2 progress: T-201 accepted. The in-memory device registry is delivered with strict ADR-007/008 implementation (4,096 cap, cycle-based aging, shared-MAC threshold, stable sorting, ScanId discipline). PQ-1 resolved: This device records are exempt from aging to preserve UI honesty. PQ-2 resolved: the shared-MAC "idle window" is defined as the ADR-007 idle horizon — only addresses whose `last_seen` is within `idle_min_age` (120 s) of `now` count toward the threshold. |
+| 1.8.0 | 2026-11-05 | Phase 2 progress: T-202 accepted; T-105 merge defect (F-4) found, verified and ordered recovered. T-202 verification: all four local gates re-run green on the pinned 1.99.1 toolchain (300 lib tests: 298 pass + 2 pre-existing privileged ignores; 9 doctests; 9 gen_oui example tests), CI 4/4 on merge ffbf918 (audit/deny/MSRV/netns from that run); the committed vendor-db.bin independently re-parsed with an external OZOUDB v1 implementation — every structural invariant holds, all ten claimed lookups reproduce exactly (incl. the C85CE2E/C85CE2 overlap pair and both D-3 duplicate groups), the 18,376 shorter-prefix-also-assigned statistic reproduces to the entry, SHA-256 b0e21c99… matches the determinism evidence; D-9 provenance re-checked live against the IEEE pages (quotes verbatim; "no explicit redistribution terms" accurate); Cargo.lock diff minimal (csv 1.4.0 + csv-core 0.1.13, dev-only). Findings: F-1 (Nit) premature DONE status-board row, corrected here as with T-201; F-2 (Nit) report §11's "34,044 distinct names" counts source rows — the served image holds 34,041 distinct referenced names; F-3 (Minor) ADR-009/010/011 files/index still read "Pending (T-105)" — root cause is F-4, fixed by the recovery merge. PQ-1 resolved by escalation: open item O-9 added (IEEE redistribution permission or documented risk acceptance, needed by T-405). Deferred: DB refresh before 0.1.0 (unassigned pre-release chore); in-memory name interning awaits T-403 RSS evidence (16.6 MiB is inside NFR-05). F-4 (repository-state defect): the accepted T-105 changeset (task/T-105-poc-campaign @ 2b9f777: poc-report.md, 15 raw-data files / 543 campaign records, the T-105 execution report, examples/poc_measure.rs, the ADR-011 experimental toggles, and the ADR-009/010/011 decision updates) was never merged into main — no PR was ever opened, and with CI triggering only on PRs and main pushes it never ran CI; plan v1.6.0 nevertheless recorded T-105 accepted and G-1 passed, leaving main without the G-1 evidence chain. Manager verification of the recovery: a --no-ff merge of 2b9f777 into main @ ffbf918 is conflict-free and all local gates are green on the merged tree (303 lib tests: 301 pass + 2 pre-existing ignores; 9 doctests; fmt/clippy/doc clean); the merge is ordered as Commit 0 of the T-203 card and its CI coverage comes with the T-203 PR. Process hardening: every task card now opens with a Commit-0 pre-flight confirming the previous task's branch is fully merged into main. |
 
 ---
 
