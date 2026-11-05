@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 //! Discovery sources (plan §8.1): the kernel neighbor-table reader
-//! (T-102), the ARP wire-format codec (T-103), and the active ARP
-//! sweep with its privilege handling (T-104); the scheduler arrives
-//! with its own task (T-204, plan §13).
+//! (T-102), the ARP wire-format codec (T-103), the active ARP sweep
+//! with its privilege handling (T-104), and the scheduling and
+//! orchestration layer (T-204, plan §13).
 //!
 //! [`neighbor_table`] implements plan §6.3 FR-DS-01/FR-DS-02 for the
 //! `/proc/net/arp` source — the interim ADR-010 path.
@@ -15,6 +15,11 @@
 //! behind [`privilege`]'s capability model — the socket opens with
 //! `CAP_NET_RAW`, capabilities drop, `no_new_privs` is set and verified
 //! (SR-06), and an `EPERM` at open time means read-only mode (ADR-005).
+//!
+//! [`scheduler`] (T-204) is the pure FR-DS-12 state machine that
+//! decides *when* cycles run — finish-anchored cadence, failure
+//! backoff, auto-stop after three consecutive failures, manual-refresh
+//! rules — plus the ADR-011 pass-policy constants.
 //!
 //! [`privilege`] is the privilege boundary of the whole application:
 //! [`open_raw_socket`] and
@@ -28,6 +33,7 @@
 pub mod arp;
 pub mod neighbor_table;
 pub mod privilege;
+pub mod scheduler;
 
 pub use arp::{
     ARP_FRAME_LEN, ArpReply, ArpReplyContext, ArpReplyCounters, ArpScanner, ArpTransport,
@@ -44,4 +50,9 @@ pub use neighbor_table::{
 pub use privilege::{
     PrivilegeError, RawSocket, StatusParseError, ThreadCapsStatus, ThreadStatusError,
     drop_capabilities, open_raw_socket, parse_thread_status, read_thread_status,
+};
+pub use scheduler::{
+    AUTO_STOP_AFTER_FAILURES, DEFAULT_REDISCOVERY_INTERVAL, DiscoveryScheduler,
+    FAILURE_BACKOFF_FLOOR, MIN_REDISCOVERY_INTERVAL, PASSES_INITIAL_AND_MANUAL, PASSES_PERIODIC,
+    RediscoveryInterval, SchedulerDecision, SchedulerError, Trigger,
 };
