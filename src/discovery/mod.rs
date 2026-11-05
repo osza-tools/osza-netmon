@@ -21,6 +21,12 @@
 //! backoff, auto-stop after three consecutive failures, manual-refresh
 //! rules — plus the ADR-011 pass-policy constants.
 //!
+//! [`worker`] (T-204) is the orchestrator thread that *executes* one
+//! discovery cycle per §8.5 (neighbor read → paced ARP sweep → listen
+//! window → neighbor read → outcome) through a real
+//! [`ArpWorkerHandle`], stamping every event with a `model::ScanId`
+//! (FR-DS-08/09/10/11/14).
+//!
 //! [`privilege`] is the privilege boundary of the whole application:
 //! [`open_raw_socket`] and
 //! [`drop_capabilities`] (plus the
@@ -28,12 +34,13 @@
 //!
 //! Per plan §8.2 this tree imports from `model` (and std) only — never
 //! from `registry`, `app` or `ui`; the application core (T-205) maps
-//! [`DiscoveryEvent`] onto its own `AppEvent`.
+//! [`DiscoveryEvent`] and [`CycleEvent`] onto its own `AppEvent`.
 
 pub mod arp;
 pub mod neighbor_table;
 pub mod privilege;
 pub mod scheduler;
+pub mod worker;
 
 pub use arp::{
     ARP_FRAME_LEN, ArpReply, ArpReplyContext, ArpReplyCounters, ArpScanner, ArpTransport,
@@ -55,4 +62,8 @@ pub use scheduler::{
     AUTO_STOP_AFTER_FAILURES, DEFAULT_REDISCOVERY_INTERVAL, DiscoveryScheduler,
     FAILURE_BACKOFF_FLOOR, MIN_REDISCOVERY_INTERVAL, PASSES_INITIAL_AND_MANUAL, PASSES_PERIODIC,
     RediscoveryInterval, SchedulerDecision, SchedulerError, Trigger,
+};
+pub use worker::{
+    CYCLE_COMMAND_CAPACITY, CYCLE_EVENT_CAPACITY, CycleEvent, CycleMode, CycleSummary, Degradation,
+    DiscoveryWorker, OrchestratorError, OrchestratorStats, OrchestratorStatsSnapshot,
 };
