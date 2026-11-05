@@ -1,0 +1,50 @@
+{
+  "run": {
+    "harness": "osza-netmon T-105 poc_measure",
+    "experiment": "late",
+    "date": "2026-11-03T06:16:30Z",
+    "responder": "T-106 netns test binary, --responder mode (as-is)",
+    "impairment_mechanism": "helper responder (T-106 seeds)"
+  },
+  "records": [
+    {
+      "experiment": "late",
+      "scenario": "S1 (20 mixed)",
+      "variant": "fixed-2500ms/2p",
+      "cycle": 1,
+      "seed": 2129465441,
+      "date": "2026-11-03T06:16:30Z",
+      "network_type": "netns synthetic (veth pair, user namespaces)",
+      "scope_size": 254,
+      "mode": "active",
+      "transport": "LinuxArpTransport (pnet_datalink 0.35.0, interim per ADR-009)",
+      "rate_pps": 100,
+      "passes": 2,
+      "sender_ip_variant": "interface IP",
+      "known_devices": 20,
+      "discovered_this_cycle": 20,
+      "discovered_cumulative": 20,
+      "recall_cumulative_pct": 100.00,
+      "extras": 0,
+      "time_to_first_ms": 0,
+      "sweep_duration_ms": null,
+      "packets_sent": 486,
+      "send_errors": 0,
+      "replies_accepted": 20,
+      "duplicates": 0,
+      "cap_dropped": 0,
+      "outcome": "complete",
+      "scan_elapsed_ms": 7389,
+      "cpu_ms": 90,
+      "responder_drops": 0,
+      "impairment_mechanism": "helper responder",
+      "transport_frames_total": null,
+      "transport_non_arp": null,
+      "transport_arp": null,
+      "witness_arp_in": null,
+      "witness_outgoing": null,
+      "notes": "responder request counts: 233 addresses probed twice (late answers re-probed once per the pass-start snapshot), 20 probed once; TX answers: 10; accepted: 20",
+      "rejected_by_reason": []
+    }
+  ]
+}

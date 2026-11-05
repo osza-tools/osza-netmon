@@ -36,6 +36,16 @@
 //! database date exposed for the help screen. The maintainer CLI
 //! `examples/gen_oui.rs` regenerates the committed image under
 //! `data/oui/`.
+//!
+//! Task T-203 completes the enrichment layer's second half
+//! (`enrichment::{hostname,dns,worker}`, `plan.md` §6.5 FR-EN-03/FR-EN-04,
+//! §4 ADR-003, ADR-015): the ADR-003 resolver selection (resolv.conf and
+//! the systemd-resolved fallback under the subnet rule), the hand-rolled
+//! DNS PTR client behind the `NameResolver` trait (ADR-015 option (a):
+//! total, bounded-response parsing, one datagram per attempt), and the
+//! std-thread worker with bounded queues, per-IP deduplication, one
+//! retry, 5-minute failure backoff and a 250 ms shutdown bound. The
+//! application core (T-205) wires the worker's events into the registry.
 
 pub mod discovery;
 pub mod enrichment;

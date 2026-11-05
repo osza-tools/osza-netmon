@@ -1,0 +1,12 @@
+osza-netmon PoC discovery (no TUI)
+interface: v-o1a (mac <redacted-random-lab-mac>, ip 192.0.2.1/24, scope 192.0.2.0/24)
+privileges after drop: CapInh=0000000000000000 CapPrm=0000000000000000 CapEff=0000000000000000 CapBnd=0000000000000000 CapAmb=0000000000000000 NoNewPrivs=1
+neighbor table: 1 entrie(s)
+scan: 2 passes at 100 pps, listen window 1.5s
+192.0.2.2 <redacted-random-lab-mac> (neighbor table)
+192.0.2.2 <redacted-random-lab-mac> (arp reply)
+192.0.2.254 02:00:00:00:00:fe (arp reply)
+summary: outcome=complete
+summary: targets=504 sent=504 send_errors=0 (transient=0 fatal=0) accepted=2 rejected=0 duplicates=0 cap_dropped=0 passes=2
+summary: replies: accepted=2 rejected=0
+summary: elapsed 7.581648052s (1 neighbor observation(s) printed before the sweep)
