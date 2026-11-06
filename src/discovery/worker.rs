@@ -46,8 +46,12 @@
 //! **fresh** cancel flag (the T-104 guarantee is preserved). A
 //! cancelled cycle skips the post-sweep neighbor read (the user asked
 //! to stop; the already-delivered evidence stays valid and is simply
-//! not aged — ADR-007) and emits `Finished` with
-//! [`ScanOutcome::Cancelled`].
+//! not aged — ADR-007) and, when the sweep itself was success-class,
+//! emits `Finished` with [`ScanOutcome::Cancelled`]. A sweep that
+//! itself **failed** stays [`ScanOutcome::Failed`] — the worse
+//! outcome wins (execution report §6, Decision 5): a late cancel
+//! never masks a real failure, so it still counts toward the
+//! FR-DS-12 streak and the failure backoff.
 //!
 //! # Delivery policy (mirrors T-104, task card §3.3)
 //!
@@ -857,12 +861,20 @@ impl WorkerThread {
             // §8.5 step 4: the post-sweep neighbor read — skipped when
             // the cycle is being cancelled (the user asked to stop;
             // the already-delivered evidence stays valid and is not
-            // aged, ADR-007).
+            // aged, ADR-007). A cancel observed at this stage cancels
+            // only a success-class sweep: a sweep that itself failed
+            // keeps its outcome — the worse outcome wins (execution
+            // report §6, Decision 5) — so the failure still feeds the
+            // FR-DS-12 streak and the failure backoff instead of
+            // masquerading as a user cancellation.
             let mut outcome = summary.outcome.clone();
             let counters = summary.counters.clone();
-            if self.tearing_down(cancel) || matches!(outcome, ScanOutcome::Cancelled) {
-                outcome = ScanOutcome::Cancelled;
-            } else {
+            let sweep_failed = matches!(outcome, ScanOutcome::Failed { .. });
+            if self.tearing_down(cancel) {
+                if !sweep_failed {
+                    outcome = ScanOutcome::Cancelled;
+                }
+            } else if !matches!(outcome, ScanOutcome::Cancelled) {
                 match self.read_neighbors() {
                     Ok(entries) => self.forward_neighbor_entries(scan_id, &entries, cancel),
                     Err(reason) => degraded = Some(Degradation::PostReadFailed { reason }),
@@ -1258,6 +1270,11 @@ mod tests {
         active: Option<std::collections::VecDeque<DiscoveryEvent>>,
         straggler: Option<DiscoveryEvent>,
         gate_open: bool,
+        /// While set, the active script's terminal `ScanFinished` is
+        /// withheld — `recv_timeout` reports `Timeout` (the orchestrator
+        /// keeps poll-slicing at `WAIT_SLICE` inside `drive_arp_scan`)
+        /// until the latch fires (T-204-RW1 R-3.3).
+        finish_hold: Option<mpsc::Receiver<()>>,
         gone: bool,
     }
 
@@ -1275,6 +1292,20 @@ mod tests {
 
         fn open_gate(&self) {
             lock_or_recover(&self.state).gate_open = true;
+        }
+
+        /// Engages the finish hold-gate (mirrors
+        /// [`FakeNeighbors::gated`]): while engaged, the active
+        /// script's terminal `ScanFinished` is withheld — the
+        /// orchestrator keeps poll-slicing at `WAIT_SLICE` inside
+        /// `drive_arp_scan` — until the returned latch fires. That
+        /// makes "the cancel flag is latched before the post-sweep
+        /// outcome branch runs" a property of the script, not of
+        /// timing.
+        fn hold_finish(&self) -> mpsc::Sender<()> {
+            let (tx, rx) = mpsc::channel();
+            lock_or_recover(&self.state).finish_hold = Some(rx);
+            tx
         }
 
         fn go_dead(&self) {
@@ -1311,6 +1342,31 @@ mod tests {
             let mut state = lock_or_recover(&self.state);
             if state.gone {
                 return Err(RecvTimeoutError::Disconnected);
+            }
+            // The finish hold-gate (T-204-RW1): while engaged, the
+            // active script's terminal `ScanFinished` is withheld —
+            // `Timeout`, so the caller keeps poll-slicing — until the
+            // latch fires; only then does the finish pass through.
+            let holding_finish = state.finish_hold.is_some()
+                && matches!(
+                    state
+                        .active
+                        .as_ref()
+                        .map(|script| (script.len(), script.front())),
+                    Some((1, Some(DiscoveryEvent::ScanFinished(_))))
+                );
+            if holding_finish {
+                let released = match state.finish_hold.as_ref() {
+                    Some(hold) => matches!(
+                        hold.try_recv(),
+                        Ok(()) | Err(mpsc::TryRecvError::Disconnected)
+                    ),
+                    None => true,
+                };
+                if !released {
+                    return Err(RecvTimeoutError::Timeout);
+                }
+                state.finish_hold = None;
             }
             if let Some(script) = state.active.as_mut()
                 && let Some(event) = script.pop_front()
@@ -1814,6 +1870,153 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(1),
             "cancel under saturation took {elapsed:?}"
+        );
+        worker.shutdown();
+    }
+
+    // -----------------------------------------------------------------------
+    // T-204-RW1 (F-1): post-sweep outcome precedence — a late cancel
+    // never downgrades a Failed sweep (§6 Decision 5)
+    // -----------------------------------------------------------------------
+
+    /// The shared prologue of the two late-cancel regressions: a
+    /// scripted sweep that gathers one reply and then ends in the given
+    /// outcome, its terminal `ScanFinished` held back by the finish
+    /// hold-gate; the pre-read and ARP batches are consumed mid-sweep,
+    /// the cancel is latched, and only then is the finish released —
+    /// so the post-sweep outcome branch provably runs with
+    /// `tearing_down == true` and the sweep's own outcome already
+    /// fixed, with no timing dependence (the flag store happens-before
+    /// the latch send, which happens-before the withheld finish is
+    /// delivered).
+    fn late_cancel_fixture(
+        sweep_outcome: ScanOutcome,
+    ) -> (
+        DiscoveryWorker,
+        Receiver<CycleEvent>,
+        FakeNeighbors,
+        mpsc::Sender<()>,
+    ) {
+        let session = GatedArpSession::default();
+        session.scan(vec![
+            DiscoveryEvent::Observations(vec![obs(2)]),
+            finished_event(sweep_outcome, 3),
+        ]);
+        // Only the pre-read is scripted on the neighbor side: a second
+        // read call would be exactly the post-sweep read the skip must
+        // prevent.
+        let neighbors = FakeNeighbors::new(vec![Ok(table_text(1))]);
+        let release = session.hold_finish();
+        let (worker, events) = spawn_with_session(session, neighbors.clone());
+        worker
+            .start_cycle(
+                Trigger::Initial,
+                params(1, DEFAULT_RATE_PPS, DEFAULT_LISTEN_WINDOW),
+            )
+            .expect("start ok");
+        assert_eq!(started_of(&next_event(&events)).0, ScanId::new(1));
+        // The pre-read batch, then the sweep's own batch — both
+        // consumed while the finish is held, i.e. mid-sweep.
+        let (pre_id, pre_batch) = observations_of(&next_event(&events));
+        assert_eq!(pre_id, ScanId::new(1));
+        assert!(
+            pre_batch
+                .iter()
+                .all(|observation| observation.source == Source::NeighborTable)
+        );
+        let (arp_id, arp_batch) = observations_of(&next_event(&events));
+        assert_eq!(arp_id, ScanId::new(1));
+        assert_eq!(arp_batch, vec![obs(2)]);
+        // The cancel is latched *before* the finish is released: this
+        // is the F-1 race, determinized.
+        worker.cancel_cycle().expect("cancel accepted");
+        release.send(()).expect("finish released");
+        (worker, events, neighbors, release)
+    }
+
+    #[test]
+    fn a_late_cancel_does_not_downgrade_a_failed_sweep() {
+        let (worker, events, neighbors, _release) = late_cancel_fixture(ScanOutcome::Failed {
+            reason: "the scripted sweep failed fatally (socket gone)".to_owned(),
+        });
+        // Post-cancel drain: nothing but the finish may appear — no
+        // observation of any kind (the post-sweep read was skipped).
+        let collected = drain_until_finished(&events);
+        assert!(
+            collected[..collected.len() - 1]
+                .iter()
+                .all(|event| !matches!(event, CycleEvent::Observations { .. })),
+            "no observations at all after the cancel"
+        );
+        let neighbor_rows = collected
+            .iter()
+            .filter_map(|event| match event {
+                CycleEvent::Observations { batch, .. } => Some(
+                    batch
+                        .iter()
+                        .filter(|observation| observation.source == Source::NeighborTable)
+                        .count(),
+                ),
+                _ => None,
+            })
+            .sum::<usize>();
+        assert_eq!(neighbor_rows, 0, "no post-read after the cancel");
+        let (fid, _, mode, summary) = finished_of(collected.last().expect("finish present"));
+        assert_eq!(fid, ScanId::new(1));
+        assert_eq!(mode, CycleMode::Active);
+        // The F-1 pin: the sweep's own Failed survives the late cancel
+        // — reason byte-identical, no cancel suffix. Never Cancelled:
+        // this match arm is the proof.
+        match &summary.outcome {
+            ScanOutcome::Failed { reason } => assert_eq!(
+                reason, "the scripted sweep failed fatally (socket gone)",
+                "the sweep's own reason, byte-identical, no cancel suffix"
+            ),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(summary.degraded, None, "the pre-read succeeded");
+        assert_eq!(
+            summary.counters.replies_accepted, 3,
+            "the sweep's counters pass through"
+        );
+        assert_eq!(
+            neighbors.calls(),
+            1,
+            "pre-read only — the post-sweep read was skipped"
+        );
+        worker.shutdown();
+    }
+
+    #[test]
+    fn a_late_cancel_still_cancels_a_completed_sweep() {
+        let (worker, events, neighbors, _release) = late_cancel_fixture(ScanOutcome::Complete);
+        let collected = drain_until_finished(&events);
+        let neighbor_rows = collected
+            .iter()
+            .filter_map(|event| match event {
+                CycleEvent::Observations { batch, .. } => Some(
+                    batch
+                        .iter()
+                        .filter(|observation| observation.source == Source::NeighborTable)
+                        .count(),
+                ),
+                _ => None,
+            })
+            .sum::<usize>();
+        assert_eq!(neighbor_rows, 0, "no post-read after the cancel");
+        let (fid, _, mode, summary) = finished_of(collected.last().expect("finish present"));
+        assert_eq!(fid, ScanId::new(1));
+        assert_eq!(mode, CycleMode::Active);
+        // The preserved half, pinned: a success-class sweep under the
+        // same late flag still finishes Cancelled (the R-1 table's
+        // Complete/Partial rows) — an implementation that removed the
+        // downgrade entirely would fail here.
+        assert_eq!(summary.outcome, ScanOutcome::Cancelled);
+        assert_eq!(summary.degraded, None);
+        assert_eq!(
+            neighbors.calls(),
+            1,
+            "pre-read only — the post-sweep read was skipped"
         );
         worker.shutdown();
     }
