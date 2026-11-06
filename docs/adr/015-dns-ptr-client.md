@@ -1,6 +1,6 @@
 # ADR-015: DNS PTR client implementation
 
-- **Status:** Pending (T-203 evidence delivered; Manager ratification with the task decision)
+- **Status:** Accepted (decided by T-203, 2026-11-05; ratified by the Manager with the T-203 acceptance — plan v1.9.0)
 - **Date:** 2026-11-05 (T-203 decision record; original entry 2026-10-28, task T-001)
 - **Deciding task / owner:** T-203 (Hostname resolver) — this record; the Manager ratifies.
 

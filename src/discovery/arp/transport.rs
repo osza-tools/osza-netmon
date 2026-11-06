@@ -155,6 +155,17 @@ impl TransportError {
                 ErrorKind::Interrupted => TransportError::Interrupted,
                 ErrorKind::PermissionDenied => TransportError::PermissionLost,
                 ErrorKind::TimedOut => TransportError::SendTimedOut,
+                // pnet_datalink's Linux backend reports an opaque
+                // "Unexpected poll event" error (no errno, kind `Other`)
+                // when its poll(2) on the channel's fd returns an
+                // unexpected revents set — in practice the interface
+                // went down or was removed mid-scan. Mapped to the
+                // honest interface-lost classification instead of the
+                // generic fatal one since T-204 (ADR-009 consequence
+                // note; T-105 follow-up 3, task card §3.4).
+                _ if err.to_string().contains("Unexpected poll event") => {
+                    TransportError::InterfaceLost
+                }
                 _ => TransportError::FatalIo {
                     message: err.to_string(),
                 },
@@ -489,6 +500,35 @@ mod tests {
         let timed_out = classified(None, io::ErrorKind::TimedOut);
         assert_eq!(timed_out, TransportError::SendTimedOut);
         assert!(!timed_out.is_fatal());
+    }
+
+    #[test]
+    fn pnet_datalinks_opaque_fatal_poll_error_maps_to_interface_lost() {
+        // T-105 follow-up 3 (applied by T-204): pnet_datalink's Linux
+        // backend reports "Unexpected poll event" as an untyped
+        // io::Error (no errno, kind Other) when its poll(2) sees an
+        // unexpected revents set — in practice the interface went down
+        // or was removed mid-scan (observed live in the T-105 campaign,
+        // report §10 "limitations" note). The honest classification is
+        // InterfaceLost, not the generic FatalIo.
+        let err = io::Error::other("Unexpected poll event");
+        let classified = TransportError::from_io(&err);
+        assert_eq!(classified, TransportError::InterfaceLost);
+        assert!(classified.is_fatal(), "interface loss is fatal");
+        assert_eq!(
+            classified.to_string(),
+            "the network interface went down or was removed"
+        );
+        // The mapping matches on the message, so it must not swallow
+        // other untyped errors: a different `Other` error still falls
+        // through to the conservative fatal classification.
+        let other = io::Error::other("something else entirely");
+        assert_eq!(
+            TransportError::from_io(&other),
+            TransportError::FatalIo {
+                message: "something else entirely".to_owned()
+            }
+        );
     }
 
     #[test]

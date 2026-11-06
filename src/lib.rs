@@ -46,6 +46,22 @@
 //! std-thread worker with bounded queues, per-IP deduplication, one
 //! retry, 5-minute failure backoff and a 250 ms shutdown bound. The
 //! application core (T-205) wires the worker's events into the registry.
+//!
+//! Task T-204 adds the discovery orchestration layer
+//! (`discovery::{scheduler,worker}`, `plan.md` §6.3 FR-DS-08…12/FR-DS-14,
+//! §8.3/§8.5): the pure FR-DS-12 scheduler state machine (finish-anchored
+//! cadence, failure backoff, auto-stop after three consecutive failures,
+//! manual-refresh rules, and the ADR-011 pass-policy constants — the
+//! authoritative home for T-205/T-402) and the orchestrator worker thread
+//! that executes whole §8.5 cycles through the T-104 arp worker
+//! (neighbor read → paced ARP sweep → listen window → neighbor read →
+//! outcome), stamping every event with a `model::ScanId`, one cycle at a
+//! time, over bounded channels, with 250 ms end-to-end cancellation and
+//! a socket-free read-only mode (FR-DS-14). The `ScanId` domain type
+//! moved from `registry::observation` into [`model`] (re-exported by the
+//! registry unchanged), and `discovery::arp::transport` now maps
+//! pnet_datalink's opaque fatal poll error to the honest
+//! interface-lost classification (T-105 follow-up 3).
 
 pub mod discovery;
 pub mod enrichment;
