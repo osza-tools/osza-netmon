@@ -4,7 +4,7 @@
 
 ## 1. Summary (≤ 5 lines)
 
-The discovery orchestration layer of plan §6.3 FR-DS-08…12/FR-DS-14 is delivered in two new modules behind the §8.2 dependency rule (model + std only, grep clean): `discovery/scheduler.rs` (1,199 lines incl. 15 tests) — the pure FR-DS-12 state machine implementing Manager rulings (a)–(f) exactly, with the typed `RediscoveryInterval` constructor (0 / ≥ 15 s / default 60 s) and the ADR-011 pass-policy constants as the authoritative home for T-205/T-402; and `discovery/worker.rs` (2,293 lines incl. 17 tests) — the orchestrator thread that executes whole §8.5 cycles through the **real** T-104 `ArpWorkerHandle` (neighbor read → paced sweep → listen window → neighbor read → outcome), stamping every event with a `model::ScanId` (moved from `registry::observation`, re-exported unchanged so every T-201 test passes unmodified), one cycle at a time over bounded channels, ≤ 250 ms cancellation, socket-free read-only mode, typed already-in-progress / worker-gone / degraded-Partial outcomes, and the ScanId discipline (stale arp events dropped and counted). The T-105 follow-up note is applied in `arp/transport.rs` (pnet's opaque "Unexpected poll event" → `InterfaceLost`, one match arm + unit test). 33 new library tests (total 406: 404 pass + the 2 pre-existing privileged ignores), the AC-9 property test (LCG high-bit draws, 2 × 20,000 sequences), the netns suite re-run 12/12 in 38.0 s unchanged, and all §9 gates green on the pinned 1.99.1 toolchain with the MSRV 1.89.0 build green.
+The discovery orchestration layer of plan §6.3 FR-DS-08…12/FR-DS-14 is delivered in two new modules behind the §8.2 dependency rule (model + std only, grep clean): `discovery/scheduler.rs` (1,199 lines incl. 15 tests) — the pure FR-DS-12 state machine implementing Manager rulings (a)–(f) exactly, with the typed `RediscoveryInterval` constructor (0 / ≥ 15 s / default 60 s) and the ADR-011 pass-policy constants as the authoritative home for T-205/T-402; and `discovery/worker.rs` (2,504 lines incl. 19 tests — the F-2/R-7 corrected count; trail in §12-D) — the orchestrator thread that executes whole §8.5 cycles through the **real** T-104 `ArpWorkerHandle` (neighbor read → paced sweep → listen window → neighbor read → outcome), stamping every event with a `model::ScanId` (moved from `registry::observation`, re-exported unchanged so every T-201 test passes unmodified), one cycle at a time over bounded channels, ≤ 250 ms cancellation, socket-free read-only mode, typed already-in-progress / worker-gone / degraded-Partial outcomes, and the ScanId discipline (stale arp events dropped and counted). The T-105 follow-up note is applied in `arp/transport.rs` (pnet's opaque "Unexpected poll event" → `InterfaceLost`, one match arm + unit test). 33 new library tests (total 406: 404 pass + the 2 pre-existing privileged ignores), the AC-9 property test (LCG high-bit draws, 2 × 20,000 sequences), the netns suite re-run 12/12 in 38.0 s unchanged, and all §9 gates green on the pinned 1.99.1 toolchain with the MSRV 1.89.0 build green.
 
 ## 2. Acceptance criteria
 
@@ -31,7 +31,7 @@ The discovery orchestration layer of plan §6.3 FR-DS-08…12/FR-DS-14 is delive
 - **`src/model/mod.rs`** — `ScanId` (u64 newtype: `new`, `as_u64`, `From<u64>`, `Display`) defined in the model root with its §5.1/§8.5 provenance documented (moved from `registry::observation`, T-204); module doc line added. No other model change.
 - **`src/registry/observation.rs`** — the definition replaced by `pub use crate::model::ScanId;`; module docs record the move and why (§8.2). Every existing T-201 test passes unmodified (R-1).
 - **`src/discovery/scheduler.rs`** (new, 1,199 lines incl. 15 tests) — `RediscoveryInterval` (+ `SchedulerError::IntervalTooShort`, `MIN_REDISCOVERY_INTERVAL` 15 s, `DEFAULT_REDISCOVERY_INTERVAL` 60 s), the ADR-011 pass-policy constants (`PASSES_INITIAL_AND_MANUAL` 2, `PASSES_PERIODIC` 1, plus re-exports of the scanner's `DEFAULT_RATE_PPS`/`DEFAULT_LISTEN_WINDOW` so this module is the one-stop policy surface), `Trigger` (Initial/Manual/Periodic with `passes()`), `SchedulerDecision` (StartCycle/None/AlreadyInProgress/AutoScansStopped), `DiscoveryScheduler` (`new`/`poll`/`manual_refresh`/`cycle_started`/`cycle_finished`/`is_running`/`auto_scans_stopped`/`failure_streak`/`interval`/`next_auto_in`), the failure-backoff floor (30 s) and auto-stop threshold (3) constants, and the AC-2 matrix + AC-9 property suite. Pure: no I/O, threads, or clocks; `Timestamp` is a parameter.
-- **`src/discovery/worker.rs`** (new, 2,293 lines incl. 17 tests) — `OrchestratorCommand`/`CycleEvent`/`CycleSummary`/`Degradation`/`CycleMode`/`OrchestratorError`/`OrchestratorStats(+Snapshot)`, the `pub(crate) ArpWorkerSession` seam (`RealArpSession` in production, the gated fake in tests), `DiscoveryWorker` (`spawn_active`/`spawn_read_only`/`start_cycle`/`cancel_cycle`/`stats`/`shutdown`+`Drop`), `WorkerThread` (run loop, `run_cycle`, read-only and active cycle runners, `drive_arp_scan`, forwarding with the bounded retry budget, lifecycle delivery, stale drains), the pacing constants (`CYCLE_COMMAND_CAPACITY` 8, `CYCLE_EVENT_CAPACITY` 64, `WAIT_SLICE` 50 ms, `FORWARD_RETRY_BUDGET` 8 × `SEND_RETRY_WAIT` 10 ms, `FIRST_SCAN_ID` 1), and the AC-3…AC-8 test battery with the fake neighbor source and the gated arp session.
+- **`src/discovery/worker.rs`** (new, 2,504 lines incl. 19 tests — the F-2/R-7 corrected count; trail in §12-D) — `OrchestratorCommand`/`CycleEvent`/`CycleSummary`/`Degradation`/`CycleMode`/`OrchestratorError`/`OrchestratorStats(+Snapshot)`, the `pub(crate) ArpWorkerSession` seam (`RealArpSession` in production, the gated fake in tests), `DiscoveryWorker` (`spawn_active`/`spawn_read_only`/`start_cycle`/`cancel_cycle`/`stats`/`shutdown`+`Drop`), `WorkerThread` (run loop, `run_cycle`, read-only and active cycle runners, `drive_arp_scan`, forwarding with the bounded retry budget, lifecycle delivery, stale drains), the pacing constants (`CYCLE_COMMAND_CAPACITY` 8, `CYCLE_EVENT_CAPACITY` 64, `WAIT_SLICE` 50 ms, `FORWARD_RETRY_BUDGET` 8 × `SEND_RETRY_WAIT` 10 ms, `FIRST_SCAN_ID` 1), and the AC-3…AC-8 test battery with the fake neighbor source and the gated arp session.
 - **`src/discovery/mod.rs`** — registers the two modules, documents them in the tree's module map, re-exports their public names (the scheduler's ADR-011 constants included; `DEFAULT_RATE_PPS`/`DEFAULT_LISTEN_WINDOW` keep their single definitions in `arp::scanner`).
 - **`src/discovery/arp/transport.rs`** — the T-105 follow-up 3 mapping (one match arm + guard in `from_io`) + its unit test; nothing else in the file changed.
 - **`src/lib.rs`** — a T-204 doc paragraph (house style).
@@ -210,3 +210,224 @@ None. `std` + the in-tree `thiserror` only (R-12); no `Cargo.toml`/`Cargo.lock` 
 1. **T-205 wiring note (informational):** the scheduler's `next_auto_in(now)` is the event loop's `recv_timeout` input (plan §8.4); `DiscoveryWorker::start_cycle` takes the decision's `trigger` + `ScanParams { passes: trigger.passes(), rate_pps: DEFAULT_RATE_PPS, listen_window: DEFAULT_LISTEN_WINDOW }` — the wiring recipe is in both modules' docs.
 2. Consider letting the netns suite (or T-403) run one orchestrator-level cycle inside a namespace so the full §8.5 chain (not just the scanner) gets wire-level evidence; the unit suite covers it through the real worker + fake transport only.
 3. If a future card revisits arp-event attribution (e.g. carrying a scan tag on `DiscoveryEvent`), the `ArpWorkerSession` seam is also the natural place to assert it; until then it stays the AC-8 test seam only.
+
+## 12. Attempt 02 addendum (T-204-RW1)
+
+*2026-11-06 · Executor: E-Vex · Card T-204-RW1 (rework of T-204 attempt 01, cycle 1 of 2 per plan §14.2; plan v1.9.0 governs; the card carries the conditional merge pre-authorization for PR #17, (a)–(e)) · Base: PR #17 head `c64e68c` (immutable — no pushed history rewritten) · Commits: `238b6cf` "T-204-RW1: failed sweeps keep their outcome under a late cancel (F-1) + regression tests", plus this report commit (the §12 addendum and the F-2 line-count corrections; its hash necessarily postdates this file's content and is reported in the delivery message). The red-green scratch branch `rw1-red` @ `e7bbe86` (tests only, based on `c64e68c`, not pushed) is part of the R-5 evidence (§C).*
+
+### A. Context
+
+The Manager review of attempt 01 (2026-11-06) returned **CHANGES REQUIRED** with two findings; everything else in the verified state at `c64e68c` stood (scope clean, §8.2 and SPDX greps clean, test counts reconciled, scheduler rulings (a)–(f) confirmed, CI 4/4).
+
+- **F-1 (Major) — sweep-outcome precedence defect.** In `run_active_cycle` (worker.rs lines 861–870 at `c64e68c`) the post-sweep outcome branch overwrote the terminal outcome unconditionally across outcome classes:
+
+  ```rust
+  let mut outcome = summary.outcome.clone();
+  let counters = summary.counters.clone();
+  if self.tearing_down(cancel) || matches!(outcome, ScanOutcome::Cancelled) {
+      outcome = ScanOutcome::Cancelled;
+  } else {
+      match self.read_neighbors() { /* §8.5 step 4: the post-sweep read */ }
+  }
+  ```
+
+  When the sweep's own summary was `Failed { reason }` and the orchestrator's shutdown flag or the cycle's cancel flag was observed at the post-sweep stage, the terminal outcome became `Cancelled`. Three consequences (all recorded here as the root-cause record): (1) **a dishonest terminal event** — a genuine failure (socket/permission/interface-lost, the `drive_arp_scan` fast paths, arp-worker-gone) reported as a user-initiated cancellation; (2) **the FR-DS-12 failure streak not incremented** — the scheduler's `cycle_finished` sees `Cancelled`, so a real failure does not count toward the 3-consecutive-failure auto-stop; (3) **the failure backoff skipped** — per Decision 4, `Cancelled` finishes anchor at the plain interval; only `Failed` finishes trigger the `max(interval, 30 s)` retry delay. This contradicted §6 Decision 5, sentence 2 (verbatim): *"A `Failed` sweep is never 'downgraded' to `Cancelled` by a late cancel flag — the worse outcome wins."* No existing test covered the race: the three cancellation tests (`cancel_completes_within_the_bound_and_the_next_cycle_runs`, `cancel_under_event_saturation_still_meets_the_bound`, `shutdown_cancels_a_running_cycle_and_joins_within_the_bound`) all cancel **mid-sweep**, so the `Cancelled` they observe is scanner-classified — the `matches!(outcome, ScanOutcome::Cancelled)` half of the condition — never the `tearing_down()` half with a latched sweep outcome.
+- **F-2 (Nit) — line-count claims.** `wc -l src/discovery/worker.rs` at `c64e68c` = **2,301**; §1 and §3 of this report both stated "2,293 lines incl. 17 tests". Both sites corrected per R-7 (§D).
+
+PQ-1 (auto-stop resumption) was finally ruled by the Manager in the card (§2, normative, no code change); §G records the acknowledgment.
+
+### B. The F-1 fix (R-1, as implemented)
+
+**Root cause:** the overwrite in the post-sweep outcome branch was unconditional across outcome classes — `tearing_down(cancel)` was allowed to rewrite not just success-class sweeps but the sweep's own failure verdict, with the three consequences above.
+
+**The implemented precedence (the R-1 table).** The terminal outcome of an active cycle is a pure function of the sweep summary's outcome and the teardown state observed at the post-sweep stage; `tearing_down(cancel)` (own cancel flag **or** orchestrator shutdown, any observation order) governs **behavior**, the sweep's own outcome class governs **severity**:
+
+| Sweep outcome (`summary.outcome`) | `tearing_down(cancel)` at post-sweep | Post-sweep read (§8.5 step 4) | Terminal outcome | Evidence |
+|---|---|---|---|---|
+| `Failed { reason }` | `false` | performed | `Failed { reason }` (degradation rules apply but never overwrite it) | unchanged code path; the read-performed half is the `else if` branch pinned end-to-end by `a_post_read_failure_degrades_too` and the full-cycle AC-3 test, the Failed-kept half by the unchanged degradation guard (below) together with the new R-3 test |
+| `Failed { reason }` | `true` | **skipped** | **`Failed { reason }` — unchanged reason, byte-identical; no cancel suffix** | **new** `a_late_cancel_does_not_downgrade_a_failed_sweep` |
+| `Complete` | `true` | skipped | `Cancelled` (unchanged) | **new** `a_late_cancel_still_cancels_a_completed_sweep` |
+| `Partial` | `true` | skipped | `Cancelled` (unchanged) | same branch as above (the fix keys on failure-class, not on Complete-vs-Partial) |
+| `Cancelled` | either | skipped | `Cancelled` (unchanged) | existing mid-sweep cancellation tests, unmodified |
+| `Complete` / `Partial` | `false` | performed | as classified; downgraded to `Partial` iff a neighbor read failed (unchanged, ADR-007) | existing `neighbor_read_failures_in_active_mode_degrade_to_partial_with_the_typed_reason`, `a_post_read_failure_degrades_too` |
+
+**Where it landed** — the outcome branch of `run_active_cycle` (worker.rs ~lines 861–882 at the RW1 head):
+
+```rust
+let mut outcome = summary.outcome.clone();
+let counters = summary.counters.clone();
+let sweep_failed = matches!(outcome, ScanOutcome::Failed { .. });
+if self.tearing_down(cancel) {
+    if !sweep_failed {
+        outcome = ScanOutcome::Cancelled;
+    }
+} else if !matches!(outcome, ScanOutcome::Cancelled) {
+    match self.read_neighbors() {
+        Ok(entries) => self.forward_neighbor_entries(scan_id, &entries, cancel),
+        Err(reason) => degraded = Some(Degradation::PostReadFailed { reason }),
+    }
+}
+```
+
+- **R-1.1 (order-independence):** the rule keys only on the sweep's outcome class and the teardown state observed at the post-sweep stage — not on whether the flag was raised before, during or after the sweep failure.
+- **R-1.2:** a `Failed` outcome carries the sweep's original `reason` unchanged and byte-identical (no wrapping, no cancel suffix), and any earlier `Degradation` (e.g. `PreReadFailed`) remains in `CycleSummary::degraded` — both reasons stay visible (Decision 6).
+- **R-1.3 (degradation precedence, unchanged):** the follow-on block still downgrades only `Complete`/`Partial` (`matches!(outcome, ScanOutcome::Complete | ScanOutcome::Partial)`) to `Partial` when `degraded.is_some()` — it never overwrites `Failed`.
+- **R-1.4 (pre-read teardown path, unchanged):** teardown observed before the sweep still finishes `Cancelled` with no sweep and no post-read (lines ~822–831 at `c64e68c`, untouched).
+- **R-1.5 (read-only cycle, unchanged):** already conformant (`read_only_neighbor_failure_fails_the_cycle` pins it).
+- **R-1.6 (minimal diff):** no signature, type, enum or constant changes; the entire production diff is the module-doc paragraph (R-2) and this one restructured condition with its comment.
+
+**R-2 module-doc correction:** the `# Cancellation (FR-DS-09)` paragraph (worker.rs lines 39–57 at the RW1 head) now states the full rule: the skip of the post-sweep neighbor read is unchanged; a cancel observed at that point cancels a **success-class** sweep (`Finished` with `ScanOutcome::Cancelled`); a sweep that itself **failed** stays `ScanOutcome::Failed` — the worse outcome wins (execution report §6, Decision 5) — so a late cancel never masks a real failure and it still counts toward the FR-DS-12 streak and the failure backoff.
+
+### C. Regression tests (R-3, R-4, R-5)
+
+Both tests sit in the AC-5 cancellation section of `mod tests`, immediately after `cancel_under_event_saturation_still_meets_the_bound`, and share the `late_cancel_fixture(sweep_outcome)` prologue: `GatedArpSession` scripted as `[Observations(vec![obs(2)]), finished_event(outcome, 3)]` (a distinctive literal failure reason in the R-3 case), `FakeNeighbors` scripted with the pre-read `Ok` only, then — engage the finish hold-gate → start the cycle → assert `Started` → consume the pre-read `Observations` (its `ScanId` asserted) → consume the ARP `Observations` batch → `worker.cancel_cycle()` → release the hold → `drain_until_finished`.
+
+**Determinism mechanism (R-3.3).** `GatedArpSession` grew a finish hold-gate mirroring `FakeNeighbors::gated()`: an `mpsc` release latch (`GatedState::finish_hold: Option<mpsc::Receiver<()>>` plus `hold_finish()`). While engaged, `recv_timeout` returns `Timeout` instead of delivering the active script's terminal `ScanFinished` (earlier scripted events pass through normally), so the orchestrator keeps poll-slicing at `WAIT_SLICE` inside `drive_arp_scan` — the exact mid-sweep state a late cancel lands in. The cancel flag is provably latched **before** the orchestrator evaluates the post-sweep outcome branch, with no timing dependence: `cancel_cycle()` stores the flag (`Release`) and returns before the test sends on the latch; the withheld finish cannot be delivered before the latch fires; and the mpsc send/receive edge supplies the happens-before chain flag-store → latch-send → latch-receive → finish-delivery → `tearing_down()` load (`Acquire`). No wall-clock sleeps (the bounded 5 s latch inside the gated fake is the house precedent); green under `--test-threads=1` and default threading; **10/10 consecutive runs each way**; full suite **3/3 consecutive parallel runs** (406 passed + 2 ignored every time).
+
+**R-5 red-green evidence.** Procedure: the two tests plus the harness extension were committed alone on the scratch branch `rw1-red` (`e7bbe86`, based on `c64e68c`; not pushed) and run there — the unfixed tree; the fix head (`238b6cf`) then runs them green. Pasted failure output on `rw1-red`:
+
+```text
+$ cargo test --locked --all-features a_late_cancel -- --test-threads=1
+running 2 tests
+test discovery::worker::tests::a_late_cancel_does_not_downgrade_a_failed_sweep ... FAILED
+test discovery::worker::tests::a_late_cancel_still_cancels_a_completed_sweep ... ok
+
+---- discovery::worker::tests::a_late_cancel_does_not_downgrade_a_failed_sweep stdout ----
+thread 'discovery::worker::tests::a_late_cancel_does_not_downgrade_a_failed_sweep' panicked at src/discovery/worker.rs:1963:22:
+expected Failed, got Cancelled
+
+failures:
+    discovery::worker::tests::a_late_cancel_does_not_downgrade_a_failed_sweep
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 406 filtered out
+```
+
+The observed `Cancelled` is exactly the F-1 defect.
+
+**Deviation from R-5's literal wording, recorded with justification:** the card says "both tests fail on the unfixed code", but R-4 pins the *preserved* half of the table (`Complete`/`Partial` + teardown → `Cancelled`) — behavior the unfixed tree already exhibits — so `a_late_cancel_still_cancels_a_completed_sweep` is green on `rw1-red` **by design**; its discriminating power targets the opposite misfix (an implementation that removes the downgrade entirely instead of exempting the failure class), exactly as R-4's own text states. That power was demonstrated explicitly: on `rw1-red` plus a one-hunk edit that removes the post-sweep downgrade outright (the outcome branch no longer forces `Cancelled` on `tearing_down`), the output is
+
+```text
+---- discovery::worker::tests::a_late_cancel_does_not_downgrade_a_failed_sweep stdout ----
+assertion `left == right' failed: pre-read only — the post-sweep read was skipped
+  left: 2
+ right: 1
+
+---- discovery::worker::tests::a_late_cancel_still_cancels_a_completed_sweep stdout ----
+assertion `left == right' failed
+  left: Complete
+ right: Cancelled
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 406 filtered out
+```
+
+(the misfix edit was then discarded — `git checkout -- src/discovery/worker.rs` — so `rw1-red`'s committed tree remains tests-only). The three-way record — red for R-3 on the unfixed tree, red for R-4 under the inverted misfix, green for both on the fix head (§E) — delivers AC-3's substance: the discrimination is proven and the old `Cancelled` outcome is pasted above; the literal sentence "both tests fail on `c64e68c`" is not achievable for a test that pins unchanged behavior, and this is recorded rather than glossed.
+
+**Assertions.** `a_late_cancel_does_not_downgrade_a_failed_sweep` (R-3.4, all mandatory items): the terminal outcome is `ScanOutcome::Failed { reason }` with the reason **byte-identical** to the scripted literal `"the scripted sweep failed fatally (socket gone)"` (exact match — the implementation wraps nothing, so no prefix accommodation was needed); it is not `Cancelled` (the match arm itself proves this); `summary.degraded == None` (successful pre-read); `summary.counters.replies_accepted == 3` (the scripted counters pass through); the post-sweep read was skipped — `neighbors.calls() == 1` (pre-read only) **and** zero `Source::NeighborTable` rows in the post-cancel drain; and no `CycleEvent::Observations` at all in the post-cancel drain. `a_late_cancel_still_cancels_a_completed_sweep` (R-4): terminal outcome `Cancelled`; `summary.degraded == None`; `neighbors.calls() == 1`; zero post-cancel `Source::NeighborTable` rows.
+
+### D. F-2 correction (R-7)
+
+Measured with `wc -l src/discovery/worker.rs`:
+
+| Tree | Lines | Note |
+|---|---|---|
+| as claimed in §1 and §3 (attempt 01) | 2,293 | wrong at both sites |
+| `c64e68c` (PR #17 head at Manager review) | 2,301 | the Manager's measurement, re-confirmed locally |
+| RW1 head (`238b6cf`, incl. the two new tests and the harness extension) | **2,504** | final — re-measured on the final head after the report commit (which does not touch `worker.rs`) |
+
+§1 and §3 now carry **2,504 lines incl. 19 tests** (17 + the two regressions), cross-referencing this subsection. No other §1–§11 edits were made.
+
+### E. Gates — the §9 inventory re-run
+
+Run on the pinned toolchain 1.99.1 (MSRV build on 1.89.0) at the code head `238b6cf`; the report commit that follows touches only this file, and the inventory was re-run on the final head with identical results (identical counts, exit codes and summary lines; wall-clock timings vary run to run). CI re-runs the same inventory on the final head (4 jobs: gates / supply-chain / msrv / netns). Pasted summary lines:
+
+```text
+$ cargo fmt --check
+[exit 0]
+
+$ cargo clippy --locked --all-targets --all-features -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.33s
+[exit 0]
+
+$ cargo test --locked --all-features
+running 408 tests
+test result: ok. 406 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 8.24s
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+running 11 tests
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+[exit 0]
+  (lib 408 = 406 passed + the 2 privileged discovery::privilege ignores; bin 0; doctests 11 —
+   exactly AC-6's expectation; the netns integration binary skips outside its wrapper, below)
+
+$ cargo test --locked --all-features --examples
+     Running unittests examples/gen_oui.rs:      running 9 tests — ok. 9 passed; 0 failed
+     Running unittests examples/poc_discover.rs: running 7 tests — ok. 7 passed; 0 failed
+     Running unittests examples/poc_measure.rs:  running 11 tests — ok. 11 passed; 0 failed
+[exit 0]
+
+$ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked
+   Generated …/target/doc/osza_netmon/index.html
+[exit 0]
+
+$ rustup run 1.89.0 cargo build --locked        # MSRV
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 23.27s
+[exit 0]
+
+$ cargo audit          # cargo-audit 0.22.2 (crates.io --locked provenance, T-203 PQ-2)
+    Loaded 1409 security advisories
+    Scanning Cargo.lock for vulnerabilities (196 crate dependencies)
+[exit 0 — no vulnerabilities]
+
+$ cargo deny check     # cargo-deny 0.20.2 (same provenance)
+advisories ok, bans ok, licenses ok, sources ok
+[exit 0 — plus the pre-existing informational "unmatched license allowance" notes
+ on unused allowlist entries (ISC, BSD-3-Clause), present since T-000]
+
+$ unshare --user --map-root-user --net bash -c 'cd <repo> && OSZA_NETMON_TESTS=1 cargo test --locked --all-features --test netns -- --test-threads=1 --nocapture'
+netns suite: 12 scenario(s), 0 failure(s), 38.0s total
+[exit 0]
+
+$ cargo run --manifest-path fuzz/Cargo.toml --bin arp_frame --target-dir target
+arp_frame fuzz target (T-103, SR-05) — std-only deterministic harness
+  outcomes: accepted=27911 rejected=772961 truncated=402460 wrong_ether_type=281095 …
+  accepted-by-corruption (non-vacuity): 150
+  result: OK — no panic path, no oracle violation
+[exit 0]
+
+$ cargo run --manifest-path fuzz/Cargo.toml --bin dns_response --target-dir target
+  outcomes: known-name 3299, no-name 5018, malformed 491403, server-failure 1367, truncated 784, timeout/transport 0
+  accepted-by-corruption (non-vacuity): 676
+  result: OK — no panic path, no oracle violation
+[exit 0]
+
+$ cargo run --manifest-path fuzz/Cargo.toml --bin resolv_conf --target-dir target
+  parse results: 401141 inputs, 864209 entries, 579386 skipped malformed lines
+  selections: 142287 selected, 258855 no-resolver (141749 selected on random inputs)
+  accepted-by-corruption (non-vacuity): 488
+  result: OK — no panic path, no invariant violation
+[exit 0]
+  (all three summaries byte-exact vs the attempt-01 §4.3 records)
+
+$ cargo test --locked --all-features a_late_cancel -- --test-threads=1
+test discovery::worker::tests::a_late_cancel_does_not_downgrade_a_failed_sweep ... ok
+test discovery::worker::tests::a_late_cancel_still_cancels_a_completed_sweep ... ok
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 406 filtered out
+[exit 0]
+```
+
+Determinism battery (AC-2): `a_late_cancel` ×10 under `--test-threads=1` → 2 passed every run; ×10 under default threading → 2 passed every run; full suite ×3 consecutive parallel runs → 406 passed + 2 ignored every run.
+
+### F. Scope proof
+
+```text
+$ git diff --stat c64e68c..HEAD
+ docs/reports/T-204/execution-01.md | 225 +++++++++++++++++++++++++++++++++++-
+ src/discovery/worker.rs            | 215 ++++++++++++++++++++++++++++++++++-
+ 2 files changed, 432 insertions(+), 8 deletions(-)
+```
+
+Only the two allowed files. `plan.md`, `Cargo.toml`/`Cargo.lock`, `fuzz/**`, `tests/**`, `.github/**` untouched (absent from the diff). No existing test function is modified — additions only: the entire diff inside `mod tests` is the harness extension (`GatedState::finish_hold`, `hold_finish`, the hold check in the fake's `recv_timeout`) plus `late_cancel_fixture` and the two tests; the diff outside `mod tests` is the R-2 module-doc paragraph and the R-1 outcome branch (6 deleted lines in total, §B). No new dependencies (`Cargo.toml`/`Cargo.lock` byte-identical), no `unsafe`, no `println!`/`eprintln!`; the lint gates are clean (§E); the §8.2 dependency grep and the SPDX header grep are clean (§9's final two commands, no output). The three fuzz summaries are byte-identical to the attempt-01 records (§E) — `fuzz/` untouched.
+
+### G. PQ-1 acknowledgment
+
+The Manager's final ruling (card §2, verbatim there; recorded by the Manager in plan v1.10.0 at acceptance — this report does not edit `plan.md`): the FR-DS-12 auto-stop is **sticky for the session** — after three consecutive `Failed` cycles the scheduler stops issuing auto starts and nothing silently resumes them; a later manual `Complete` resets the failure streak while `auto_scans_stopped` stays `true` and `poll` never issues an auto start again; manual refresh remains available while stopped; the only re-arm in MVP 0.1.0 is a session boundary — process restart. The scheduler-re-creation option is deferred to post-MVP, and any future re-arm must be an explicit, visible user action with its own task card and ADR. The T-205 constraint stands: the auto-stopped condition is persistent application state (an `AppState` field fed by the `AutoScansStopped` notice / `auto_scans_stopped()`, plus the message-log entry when it fires), manual refresh keeps working, and no in-session control resumes auto-scanning — the honest indication is that a restart re-arms it (exact wording and placement belong to T-303/T-401). **No scheduler change was required or made:** the implemented behavior already conforms, `the_stop_is_sticky_across_a_later_manual_success` is the pinning test, and the F-1 fix is precisely what makes a real failure reach that machinery honestly instead of masquerading as a cancellation.
