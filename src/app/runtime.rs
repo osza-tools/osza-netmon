@@ -977,18 +977,26 @@ mod tests {
         assert!(runtime.state().discovery_armed());
         assert_eq!(runtime.state().screen(), Screen::Dashboard);
 
-        // Bounded-poll the loop until the whole cycle and the hostname
-        // answer have flowed through (no blind sleeps — the deadline
-        // bounds the wait; 10 s dwarfs a read-only cycle plus one fake
-        // lookup).
+        // The observed neighbor's identity (needed by the wait
+        // condition below — the local device's own lookup resolving
+        // first must not end the wait early).
+        let observed_key = DeviceKey {
+            iface_index: 2,
+            mac: "02:00:00:00:00:05".parse().expect("valid MAC"),
+        };
+
+        // Bounded-poll the loop until the whole cycle AND the observed
+        // device's hostname answer have flowed through (no blind
+        // sleeps — the deadline bounds the wait; 10 s dwarfs a
+        // read-only cycle plus one fake lookup).
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             runtime.step(Duration::from_millis(20));
             let state = runtime.state();
             let hostname_known = state
                 .registry
-                .iter()
-                .any(|device| device.hostname.is_known());
+                .get(&observed_key)
+                .is_some_and(|device| device.hostname.is_known());
             let cycle_done = state.last_scan().is_some();
             if hostname_known && cycle_done {
                 break;
@@ -1003,10 +1011,6 @@ mod tests {
         // Cycle events flowed through the forwarder into the registry:
         // the local device plus the observed .5 neighbor.
         assert_eq!(state.registry.device_count(), 2);
-        let observed_key = DeviceKey {
-            iface_index: 2,
-            mac: "02:00:00:00:00:05".parse().expect("valid MAC"),
-        };
         let observed = state.registry.get(&observed_key).expect("the .5 device");
         assert_eq!(observed.primary_ip(), Ipv4Addr::new(192, 0, 2, 5));
         assert!(observed.sources.contains(Source::NeighborTable));
