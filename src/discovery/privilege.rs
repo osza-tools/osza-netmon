@@ -26,6 +26,15 @@
 //! compensates with a mandatory software EtherType filter (FR-DS-06
 //! condition 1 is still enforced by [`parse_arp_reply`](crate::discovery::arp::parse_arp_reply)).
 //!
+//! Task T-205 adds the informational root check of ADR-005 item 5
+//! (assigned by T-104-FU1): [`running_as_root`] reads the effective
+//! uid from `/proc/self/status` once at startup (via the pure, total
+//! [`parse_effective_uid`]); an unreadable or unparsable file yields
+//! `false` — the warning is suppressed when the answer cannot be
+//! determined. It is deliberately NOT a capability probe: capabilities
+//! are dropped on the socket path regardless of uid, and the check
+//! only feeds the §6.8 startup message.
+//!
 //! Capability manipulation uses the `caps` crate and `no_new_privs` uses
 //! `nix::sys::prctl` — both safe wrappers; this crate keeps
 //! `#![forbid(unsafe_code)]` (SR-01). Bounding-set clearing is attempted
@@ -395,6 +404,67 @@ pub fn read_thread_status() -> Result<ThreadCapsStatus, ThreadStatusError> {
     parse_thread_status(&content).map_err(ThreadStatusError::Parse)
 }
 
+/// Bound on the `/proc/self/status` read (SR-10): the file is a few
+/// KiB on any real kernel; the bound only caps pathological content
+/// before the pure parser sees it.
+const SELF_STATUS_MAX_BYTES: u64 = 64 * 1024;
+
+/// Where the process's own uid picture is read (ADR-005 item 5).
+/// `/proc/self/status` reports the process (the tgid leader's view),
+/// which is what "started as root" means; the thread-specific view
+/// stays with [`THREAD_STATUS_PATH`].
+const SELF_STATUS_PATH: &str = "/proc/self/status";
+
+/// Whether the process runs with effective uid 0 (ADR-005 item 5,
+/// assigned to T-205 by T-104-FU1). Read once at startup from
+/// `/proc/self/status` (the "Uid:" line, second field = effective uid),
+/// size-bounded and total per SR-10. Informational only: capabilities
+/// are dropped on the socket path regardless of uid. An unreadable or
+/// unparsable status file yields `false` (the warning is suppressed
+/// when the value cannot be determined — documented, honest).
+pub fn running_as_root() -> bool {
+    let mut content = String::new();
+    let read = File::open(SELF_STATUS_PATH).and_then(|file| {
+        file.take(SELF_STATUS_MAX_BYTES)
+            .read_to_string(&mut content)
+    });
+    match read {
+        Ok(_) => parse_effective_uid(&content) == Some(0),
+        Err(_) => false,
+    }
+}
+
+/// Parses the effective uid out of a `/proc/self/status` text (the
+/// pure, total function behind [`running_as_root`], task card §5.10).
+///
+/// The `Uid:` line has four tab-separated fields — real, **effective**,
+/// saved, fs — and the *second* one decides. Everything else in the
+/// text is ignored; a missing `Uid:` line, a field count below two, or
+/// a non-numeric field yields `None` (never a panic; the file is
+/// untrusted input, SR-02/SR-10). Whitespace around values is
+/// tolerated, mirroring [`parse_thread_status`].
+pub fn parse_effective_uid(content: &str) -> Option<u32> {
+    // Last `Uid:` line wins if several exist (the kernel writes one;
+    // hostile input may write more — the same overwrite discipline as
+    // `parse_thread_status`'s field loop).
+    let mut effective_uid: Option<u32> = None;
+    for line in content.lines() {
+        let Some((field, value)) = line.split_once(':') else {
+            continue;
+        };
+        if field != "Uid" {
+            continue;
+        }
+        // The four uid fields are tab-separated; take the second
+        // (effective) and parse it decimally.
+        effective_uid = value
+            .split_whitespace()
+            .nth(1)
+            .and_then(|effective| effective.parse::<u32>().ok());
+    }
+    effective_uid
+}
+
 /// Why synthetic or hostile status text could not be parsed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StatusParseError {
@@ -629,6 +699,89 @@ Speculation_Store_Bypass:\tvulnerable
         // Very long single line (no newline at all).
         let _ = parse_thread_status(&"x".repeat(10_000));
         // No panic is the assertion.
+    }
+
+    // ---- §5.10: the ADR-005 item 5 root check (T-205, T-104-FU1) -----------
+
+    /// A realistic `/proc/self/status` excerpt with the `Uid:` line in
+    /// its kernel position (the four fields are real, effective,
+    /// saved, fs — tab-separated).
+    const SELF_STATUS: &str = "\
+Name:\tosza-netmon
+Umask:\t0022
+State:\tS (sleeping)
+Tgid:\t4242
+Pid:\t4242
+PPid:\t1
+Uid:\t1000\t1000\t1000\t1000
+Gid:\t1000\t1000\t1000\t1000
+NoNewPrivs:\t0
+";
+
+    #[test]
+    fn parses_effective_uid_from_a_realistic_status() {
+        // A normal user: real = effective = 1000.
+        assert_eq!(parse_effective_uid(SELF_STATUS), Some(1000));
+        // Root: effective field 0 (a setuid-root process has real 1000,
+        // effective 0 — the second field must decide, not the first).
+        let setuid_root = SELF_STATUS.replace("Uid:\t1000\t1000", "Uid:\t1000\t0");
+        assert_eq!(parse_effective_uid(&setuid_root), Some(0));
+        // Full root: all four fields 0.
+        let full_root = "Uid:\t0\t0\t0\t0\n".to_owned();
+        assert_eq!(parse_effective_uid(&full_root), Some(0));
+    }
+
+    #[test]
+    fn effective_uid_parse_tolerates_whitespace_and_unknown_lines() {
+        // Spaces instead of tabs, trailing space, unknown lines around.
+        let text = "Name: x\nUid:  1000  1001  1002  1003  \nOther:\ty\n";
+        assert_eq!(parse_effective_uid(text), Some(1001));
+        // The last Uid line wins if several exist (kernel writes one;
+        // hostile input may write more — total, no panic).
+        let two_lines = "Uid:\t0\t5\t0\t0\nUid:\t1000\t1000\t1000\t1000\n";
+        assert_eq!(parse_effective_uid(two_lines), Some(1000));
+    }
+
+    #[test]
+    fn effective_uid_parse_is_total_over_garbage() {
+        // Missing Uid line entirely.
+        assert_eq!(parse_effective_uid("Name: x\nPid: 1\n"), None);
+        // Uid line with only one field (no effective field).
+        assert_eq!(parse_effective_uid("Uid:\t1000\n"), None);
+        // Uid line with an empty value.
+        assert_eq!(parse_effective_uid("Uid:\t\n"), None);
+        // Non-numeric fields.
+        assert_eq!(parse_effective_uid("Uid:\t1000\troot\t0\t0\n"), None);
+        assert_eq!(parse_effective_uid("Uid:\ta\tb\tc\td\n"), None);
+        // Negative / overflow values.
+        assert_eq!(parse_effective_uid("Uid:\t0\t-1\t0\t0\n"), None);
+        assert_eq!(
+            parse_effective_uid("Uid:\t0\t4294967296\t0\t0\n"),
+            None,
+            "u32::MAX + 1 must not parse"
+        );
+        // Empty text.
+        assert_eq!(parse_effective_uid(""), None);
+        // Structure-less garbage and a very long line: no panic.
+        let hostile = "\u{0}:::\n\r\nUid:::::\n\u{7f}\n";
+        let _ = parse_effective_uid(hostile);
+        let _ = parse_effective_uid(&"x".repeat(10_000));
+        let _ = parse_effective_uid(&hostile.repeat(50));
+        // A u32::MAX value parses (the boundary of the type).
+        assert_eq!(
+            parse_effective_uid("Uid:\t0\t4294967295\t0\t0\n"),
+            Some(u32::MAX)
+        );
+    }
+
+    #[test]
+    fn running_as_root_is_total_and_stable() {
+        // The totality smoke test the card asks for: two calls agree on
+        // this machine (the environment decides *which* answer is
+        // honest; the function must merely be total and stable).
+        let first = running_as_root();
+        let second = running_as_root();
+        assert_eq!(first, second, "two reads of /proc/self/status agree");
     }
 
     #[test]
