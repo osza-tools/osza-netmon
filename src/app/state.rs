@@ -489,6 +489,20 @@ impl AppState {
         self.dirty
     }
 
+    /// Observes-and-clears the dirty flag: the renderer's consume step
+    /// (task T-301's pre-authorized exception E-1 — the only additive
+    /// accessor this task may add to `src/app/`; every existing API
+    /// could only read the flag, never clear it, so a render loop
+    /// driven by `dirty` alone would re-render every wake).
+    ///
+    /// Returns `true` when a render is due for changes accumulated
+    /// since the last call (construction starts `true`, so the first
+    /// frame draws); `false` leaves the flag cleared until the next
+    /// state change marks it again.
+    pub fn take_dirty(&mut self) -> bool {
+        core::mem::replace(&mut self.dirty, false)
+    }
+
     /// The vendor database date (for T-304's help screen).
     pub fn vendor_database_date(&self) -> DatabaseDate {
         self.vendor_db.database_date()
@@ -808,5 +822,44 @@ mod tests {
         clock.advance(Duration::from_secs(60));
         assert_eq!(state.screen(), Screen::Notice);
         assert!(!state.quit());
+    }
+
+    #[test]
+    fn take_dirty_observes_and_clears_the_flag_once_per_change() {
+        // E-1's contract (T-301): the renderer consumes the flag —
+        // `true` once per accumulated change, `false` on an idle
+        // second look, `true` again only after another change. The
+        // read-only `dirty()` accessor stays untouched (tested above)
+        // and never clears.
+        let mut state = AppState::with_scope_entries(
+            SessionParams::default(),
+            Vec::new(),
+            db(),
+            &FakeClock::new(),
+        )
+        .expect("defaults are valid");
+        // Construction starts dirty: the first frame has something to
+        // draw — the first consume sees it, the second does not.
+        assert!(state.dirty());
+        assert!(state.take_dirty(), "the first frame is due");
+        assert!(!state.take_dirty(), "nothing changed since");
+        assert!(!state.dirty(), "the cleared flag stays cleared");
+        // A state change through the real `update` re-marks it…
+        let effects = crate::app::update::update(
+            &mut state,
+            crate::app::event::AppEvent::Tick,
+            &FakeClock::new(),
+        );
+        assert!(effects.is_empty());
+        assert!(state.take_dirty(), "a tick is a change (FR-UI-07)");
+        // …and an ignored (unknown) event does not.
+        crate::app::update::update(
+            &mut state,
+            crate::app::event::AppEvent::Input(crate::app::event::InputEvent::Key(
+                crate::app::event::Key::Char('x'),
+            )),
+            &FakeClock::new(),
+        );
+        assert!(!state.take_dirty(), "an unknown key changes nothing");
     }
 }

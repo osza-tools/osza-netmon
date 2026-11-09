@@ -23,10 +23,11 @@ Status vocabulary (plan.md §4): **Accepted** · **Provisional** (accepted, owne
 | 015 | DNS PTR client implementation | Accepted (decided by T-203, 2026-11-05; ratified — plan v1.9.0) | [015-dns-ptr-client.md](015-dns-ptr-client.md) |
 | 016 | CI provider: GitHub Actions | Accepted | [016-ci-provider.md](016-ci-provider.md) |
 | 017 | Interface data source (`getifaddrs` via `nix`) | Accepted (PQ-1 resolved by Manager decision, 2026-10-31) | [017-interface-data-source.md](017-interface-data-source.md) |
+| 018 | Signal handling (SIGTERM/SIGHUP) for the terminal lifecycle | Accepted (decided by T-301, 2026-11-10; `signal-hook` 0.3.18 exact pin — plan v1.11.0) | [018-signal-handling.md](018-signal-handling.md) |
 
 Notes:
 
 - All ADRs carry the transcription date 2026-10-28 (task T-001).
 - ADR-001…016 are transcriptions of `plan.md` §4 (task T-001). **ADR-017 is the first ADR that originates from a task-card decision** (T-101 §3 authorizes choosing the interface data source): it is not plan.md §4 text, and its status reflects the task's PQ-1 Manager confirmation rather than a §4 entry. `plan.md` remains the single source of truth for ADR-001…016.
 - Statuses are exactly those of `plan.md` v1.1.0 §4. Task card T-001 §5.2 listed three statuses that match the superseded plan v1.0.0 instead (ADR-001 "Provisional", ADR-014 "Open", ADR-016 "Open"); per `plan.md` §0.2 precedence (plan > task card) and the card's own rule "Every ADR's status must exactly match §4 of `plan.md`", the v1.1.0 statuses above are authoritative. See `docs/reports/T-001/execution-01.md`, Plan Question PQ-1.
-- ADR-009/010/011 were decided together by T-105 (2026-11-03, evidence in `docs/poc/poc-report.md`); ADR-015 is decided by T-203; the ADR-005 capability-library mechanism is chosen by T-104; the ADR-014 SPDX variant remains open item O-7 (plan.md §20). ADR-017 was accepted with PQ-1 resolved by the Manager's decision of 2026-10-31 (`nix` 0.31.3 adopted).
+- ADR-009/010/011 were decided together by T-105 (2026-11-03, evidence in `docs/poc/poc-report.md`); ADR-015 is decided by T-203; the ADR-005 capability-library mechanism is chosen by T-104; the ADR-014 SPDX variant remains open item O-7 (plan.md §20). ADR-017 was accepted with PQ-1 resolved by the Manager's decision of 2026-10-31 (`nix` 0.31.3 adopted). ADR-018 was decided by T-301 under its task card's §5.3 pre-authorization (option (a), the exact-pinned `signal-hook`); it is a task-card decision in ADR-017's lineage, not plan.md §4 text, and the Manager ratifies it in review.

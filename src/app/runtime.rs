@@ -343,6 +343,21 @@ impl<E: EffectsExecutor> Runtime<E> {
         &self.state
     }
 
+    /// Consumes the state's dirty flag — [`AppState::take_dirty`](super::AppState::take_dirty)
+    /// (task T-301's pre-authorized accessor E-1) exposed through the
+    /// runtime, because the runtime owns the state and the render loop
+    /// holds the runtime: `true` when a render is due for changes
+    /// accumulated since the last call.
+    ///
+    /// The delegation is T-301 deviation D-1 (its report §5): the
+    /// card authorizes the accessor on the state but no existing API
+    /// lends a `&mut AppState` out of the runtime, so the one-line
+    /// forward is the minimal reach path — nothing else in this
+    /// module changed.
+    pub fn take_dirty(&mut self) -> bool {
+        self.state.take_dirty()
+    }
+
     /// One loop iteration (§5.8; module docs). Deterministic under
     /// `Duration::ZERO`: whatever is queued is processed, plus one
     /// scheduler poll and one hostname drain.
@@ -772,6 +787,48 @@ mod tests {
             runtime.state().scheduler.next_auto_in(clock.now()),
             Some(Duration::ZERO)
         );
+        drop(runtime);
+    }
+
+    #[test]
+    fn take_dirty_surfaces_and_clears_the_render_due_flag() {
+        // T-301's render loop consumes the flag through the runtime
+        // (the E-1 accessor's reach path, deviation D-1): one `true`
+        // per step that changed something, `false` on a step that
+        // processed only ignored input.
+        let clock: Arc<dyn Clock + Send + Sync> =
+            Arc::new(SharedFakeClock(Arc::new(StdMutex::new(FakeClock::new()))));
+        let state = AppState::with_scope_entries(
+            SessionParams::default(),
+            vec![eth_entry()],
+            db(),
+            clock.as_ref(),
+        )
+        .expect("valid");
+        let (mut runtime, sender) = Runtime::new(
+            state,
+            RecordingExecutor::new(),
+            dummy_discovery_receiver(),
+            clock,
+        );
+        // The construction-time dirty flag survives to the first
+        // consume even when the first step processes nothing.
+        assert!(runtime.take_dirty(), "the first frame is due");
+        assert!(!runtime.take_dirty());
+        // A state-changing event (resize) re-marks it…
+        send(
+            &sender,
+            AppEvent::Resize {
+                width: 100,
+                height: 30,
+            },
+        );
+        runtime.step(Duration::ZERO);
+        assert!(runtime.take_dirty(), "a resize is a change");
+        // …an ignored key does not (update leaves the flag clear).
+        send(&sender, AppEvent::Input(InputEvent::Key(Key::Char('x'))));
+        runtime.step(Duration::ZERO);
+        assert!(!runtime.take_dirty(), "an unknown key changes nothing");
         drop(runtime);
     }
 
