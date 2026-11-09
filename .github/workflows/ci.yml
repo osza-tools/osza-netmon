@@ -27,7 +27,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned Rust toolchain (from rust-toolchain.toml)
-        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
       # cargo-fmt does not accept --locked (it performs no dependency
       # resolution); every command below that resolves dependencies uses it.
       - name: cargo fmt --check
@@ -57,7 +57,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned Rust toolchain (from rust-toolchain.toml)
-        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
         with:
           cache: false
       # cargo-audit and cargo-deny are installed from their official
@@ -96,7 +96,7 @@ jobs:
           echo "msrv=${msrv}" >> "$GITHUB_OUTPUT"
           echo "MSRV: ${msrv}"
       - name: Install MSRV toolchain (overrides rust-toolchain.toml)
-        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
         with:
           toolchain: ${{ steps.msrv.outputs.msrv }}
           cache: false
@@ -110,7 +110,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned Rust toolchain (from rust-toolchain.toml)
-        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
       # T-106 (plan S11.2): the opt-in namespace suite. Build outside
       # the wrapper first -- inside the namespace cargo must not need
       # the network (--locked, warm target dir).
