@@ -63,6 +63,19 @@
 //! pnet_datalink's opaque fatal poll error to the honest
 //! interface-lost classification (T-105 follow-up 3).
 
+//! Task T-205 adds the [`app`] layer: the headless application core
+//! (plan §8.1, §8.3–8.5) — the `AppState` screen machine (Notice →
+//! Scope → Dashboard ⇄ Details with the help and too-small overlays),
+//! the terminal-agnostic event union feeding one bounded queue, the
+//! pure `update(state, event, clock) -> effects` with the §10.3 key
+//! map and the §5.9 enrichment rules, and the runtime that wires the
+//! reviewed T-203/T-204 workers behind the ADR-012 single-commander
+//! contract (bounded channels, flag-checked waits, a bounded shutdown
+//! sequence). Phase 3 (T-301…) only attaches a terminal: scenario
+//! scripts drive the whole flow headlessly, and the NFR-03 benchmark
+//! proves no loop iteration blocks > 100 ms at 4,096 devices.
+
+pub mod app;
 pub mod discovery;
 pub mod enrichment;
 pub mod model;
