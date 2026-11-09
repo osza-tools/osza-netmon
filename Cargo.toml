@@ -28,6 +28,11 @@ name = "netns"
 path = "tests/netns/main.rs"
 harness = false
 
+[[test]]
+name = "pty"
+path = "tests/pty/main.rs"
+harness = false
+
 [dependencies]
 # ratatui is pinned to an exact version (plan §9.1); thiserror is a caret
 # requirement. Cargo.lock is committed, so both resolve versions are
