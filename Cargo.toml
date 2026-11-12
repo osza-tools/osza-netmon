@@ -16,14 +16,21 @@ publish = false
 # custom test binary (harness = false) because its "responder" and "probe"
 # modes re-exec the same executable with subcommands (std::env::current_exe
 # + `--responder`), which a generated libtest main cannot dispatch. With
-# autotests disabled, every test target is declared explicitly — today that
-# is exactly the one netns target; future test targets must be added here
-# (or the flag revisited by a Plan Question).
+# autotests disabled, every test target is declared explicitly — the netns
+# target and, since T-301, the pty target (tests/pty/, same custom-harness
+# shape for the same reason: its --fake-session mode re-execs itself on a
+# pty driven by the scenario runner). Future test targets must be added
+# here as well (or the flag revisited by a Plan Question).
 autotests = false
 
 [[test]]
 name = "netns"
 path = "tests/netns/main.rs"
+harness = false
+
+[[test]]
+name = "pty"
+path = "tests/pty/main.rs"
 harness = false
 
 [dependencies]
@@ -57,6 +64,14 @@ pnet_datalink = "=0.35.0"
 # transitive). Exact pin like the other task-approved crates. Manager
 # approval recorded as PQ-1 in the T-104 execution report.
 caps = "=0.5.6"
+# SIGTERM/SIGHUP handling (task T-301, ADR-018): signal-hook is already a
+# transitive dependency of the pinned crossterm (its SIGWINCH source), so
+# this exact pin of the locked version adds zero new crates to the tree
+# and enables no feature crossterm had not already enabled (both use the
+# default channel+iterator set). The §9.2 evaluation against the nix
+# signalfd alternative is in docs/adr/018-signal-handling.md; the
+# pre-authorization is task card T-301 §5.3 option (a).
+signal-hook = "=0.3.18"
 
 [dev-dependencies]
 # T-202 §8 pre-approval (plan §9.1 dev-only candidate): CSV parsing for

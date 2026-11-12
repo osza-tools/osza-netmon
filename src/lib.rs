@@ -75,12 +75,27 @@
 //! scripts drive the whole flow headlessly, and the NFR-03 benchmark
 //! proves no loop iteration blocks > 100 ms at 4,096 devices.
 
+//! Task T-301 adds the [`ui`] layer: the terminal front end (plan
+//! §8.1, §8.3, §8.4, §8.8) — the terminal lifecycle guard (raw mode,
+//! alternate screen, explicit mouse capture, restore on every exit
+//! path), the one dedicated input thread translating crossterm events
+//! onto the app's `Key`/`AppEvent` vocabulary through the §10.3 map,
+//! the SIGTERM/SIGHUP bridge quitting through the app's normal quit
+//! path (ADR-018), the §8.4 loop with dirty-flag rendering and the
+//! 1 Hz tick, and the binary assembly wiring the reviewed workers
+//! under the ADR-005 privilege order. The screens are deliberately
+//! placeholder (T-302/T-303/T-304 replace them wholesale); the
+//! pty-test evidence (terminal restored after normal exit, error
+//! exit, forced panic, SIGTERM, SIGHUP; resize; the end-to-end
+//! smoke; idle CPU) lives in the `tests/pty` harness.
+
 pub mod app;
 pub mod discovery;
 pub mod enrichment;
 pub mod model;
 pub mod net;
 pub mod registry;
+pub mod ui;
 
 use std::ffi::OsString;
 
