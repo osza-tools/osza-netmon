@@ -19,7 +19,9 @@
 //! either: it overlays whatever screen is active when the terminal is
 //! under 80×24 (NFR-08) and recovers automatically (FR-ST-04) — the
 //! underlying screen and the whole state survive a shrink/grow cycle
-//! unchanged.
+//! unchanged. The Scope screen's FR-SC-06/FR-SC-07 confirmation
+//! dialogs are overlays too ([`ConfirmOverlay`], task T-302's E-2b):
+//! they capture the Scope screen's keys while open.
 //!
 //! # The interface snapshot ([`ScopeEntry`]) — deviation D-1
 //!
@@ -49,6 +51,7 @@
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::discovery::ScanOutcome;
 use crate::discovery::scheduler::DiscoveryScheduler;
@@ -65,6 +68,7 @@ use crate::model::Timestamp;
 use crate::net::Eligibility;
 use crate::net::InterfaceClass;
 use crate::net::InterfaceInfo;
+use crate::net::LinkType;
 use crate::net::suggest_interface;
 use crate::registry::Registry;
 
@@ -105,6 +109,58 @@ pub enum Screen {
     Details,
 }
 
+/// Which confirmation dialog the Scope screen is showing (task T-302's
+/// E-2b: the FR-SC-06/FR-SC-07 confirmations). Not a screen — an
+/// overlay on [`Screen::Scope`], modal over its keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmKind {
+    /// FR-SC-06's refusal: the selected network's probe target count
+    /// exceeds the active-scan cap, so active discovery is refused.
+    /// Read-only discovery remains available — `Enter` continues
+    /// read-only, `Esc` cancels back to the list (no typing).
+    LargeScopeRefusal {
+        /// The network's probe target count (FR-SC-05).
+        targets: u64,
+        /// The applicable cap (the session's `max_hosts`).
+        cap: u32,
+    },
+    /// FR-SC-06's raised-cap confirmation: the target count exceeds the
+    /// default cap but fits the raised one, so active discovery needs
+    /// an explicit `Enter` after seeing the packet count and the
+    /// estimated duration. `Esc` cancels (no typing).
+    LargeScope {
+        /// The network's probe target count (FR-SC-05).
+        targets: u64,
+        /// The ARP requests the initial scan will send (targets ×
+        /// passes, ADR-011).
+        requests: u64,
+        /// The card-fixed duration estimate (task T-302 §5.3).
+        estimated: Duration,
+    },
+    /// FR-SC-07's typed-`yes` confirmation: the selected network is not
+    /// private/link-local/CGNAT and the mode is active. Letters
+    /// accumulate; `Enter` submits (only the exact text `yes`
+    /// proceeds); `Esc` cancels; `q`/`Ctrl+C` do **not** quit while
+    /// typing (§10.3's exception clause — the typing context owns the
+    /// letters).
+    PublicRange {
+        /// The network that would be probed.
+        network: Ipv4Net,
+    },
+}
+
+/// One open confirmation dialog: its kind plus the typed buffer (only
+/// [`ConfirmKind::PublicRange`] accumulates letters; task T-302's
+/// E-2b).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmOverlay {
+    /// Which dialog this is.
+    pub kind: ConfirmKind,
+    /// The letters typed so far (bounded; `yes` is the only accepting
+    /// text).
+    pub typed: String,
+}
+
 /// The app's snapshot of one [`InterfaceInfo`] (deviation D-1, see the
 /// module docs): everything the scope screen and the confirm path
 /// need, projected from the net layer's public accessors.
@@ -130,6 +186,8 @@ pub struct ScopeEntry {
     pub is_running: bool,
     /// `IFF_LOOPBACK`.
     pub is_loopback: bool,
+    /// The link-layer type (FR-SC-01; `ARPHRD`-derived).
+    pub link_type: LinkType,
     /// The FR-SC-02 class (name-pattern derived, snapshotted).
     pub class: InterfaceClass,
     /// The FR-SC-03 eligibility (with its first failing reason,
@@ -153,6 +211,7 @@ impl ScopeEntry {
             is_up: info.is_up(),
             is_running: info.is_running(),
             is_loopback: info.is_loopback(),
+            link_type: info.link_type(),
             class: info.class(),
             eligibility: info.eligibility(),
             default_gateway: info.default_gateway(),
@@ -197,6 +256,15 @@ pub struct ConfirmedScope {
     /// The default-route gateway of the confirmed interface, when it
     /// carries one (FR-SC-01; the `Gateway` tag source).
     pub gateway_ip: Option<Ipv4Addr>,
+    /// Whether the confirmed scope runs **active** discovery (task
+    /// T-302's E-2d, the PQ-3 attach decision): `false` when the
+    /// confirmation proceeded read-only — the session is read-only
+    /// (FR-DS-14), the interface reports no valid MAC (no identity,
+    /// ADR-008), the network is a `/32` (zero probe targets,
+    /// FR-SC-05), or the FR-SC-06 refusal was continued read-only.
+    /// The startup assembly reads this fact when it selects the
+    /// confirmed interface's transport (§5.7 of the T-302 card).
+    pub discovery_active: bool,
 }
 
 /// What the last finished cycle did (§5.4: the header's last-scan
@@ -260,6 +328,16 @@ pub struct AppState {
     /// The selected row of the scope screen (an index into
     /// `interfaces`; moves among eligible entries only).
     pub(crate) scope_selected: usize,
+    /// The FR-SC-02 suggestion's row (the suggested interface — the
+    /// one the selection starts on; T-302's E-2d: the screen must
+    /// mark it, and the moving selection cannot carry that fact).
+    pub(crate) scope_suggested: usize,
+    /// The open confirmation dialog, if any (E-2b; overlays the Scope
+    /// screen and captures its keys).
+    pub(crate) confirm: Option<ConfirmOverlay>,
+    /// The active-scan host cap (E-2d; FR-SC-06 — the confirm path
+    /// gates on it).
+    pub(crate) max_hosts: u32,
     /// The device registry (T-201) — the single source of truth.
     pub(crate) registry: Registry,
     /// The FR-DS-12 scheduler (T-204).
@@ -325,7 +403,7 @@ impl AppState {
             })
             .unwrap_or(0);
         let entries: Vec<ScopeEntry> = interfaces.iter().map(ScopeEntry::from_interface).collect();
-        Self::build(params, entries, selected, vendor_db, clock)
+        Self::build(params, entries, selected, selected, vendor_db, clock)
     }
 
     /// Builds the state from synthetic scope entries (the test path —
@@ -348,15 +426,17 @@ impl AppState {
             .iter()
             .position(ScopeEntry::is_eligible)
             .unwrap_or(0);
-        Self::build(params, entries, selected, vendor_db, clock)
+        Self::build(params, entries, selected, selected, vendor_db, clock)
     }
 
     /// The common construction: validated registry, fresh scheduler,
-    /// initial screen, startup messages (§5.4).
+    /// initial screen, startup messages (§5.4). `suggested` is the
+    /// FR-SC-02 suggestion's row (the selection starts there).
     fn build(
         params: SessionParams,
         entries: Vec<ScopeEntry>,
         selected: usize,
+        suggested: usize,
         vendor_db: Arc<VendorDb>,
         clock: &dyn Clock,
     ) -> Result<Self, AppInitError> {
@@ -375,6 +455,9 @@ impl AppState {
             confirmed: None,
             interfaces: entries,
             scope_selected: selected,
+            scope_suggested: suggested,
+            confirm: None,
+            max_hosts: params.max_hosts,
             registry,
             scheduler,
             vendor_db,
@@ -452,6 +535,25 @@ impl AppState {
     /// The scope screen's selected row.
     pub fn scope_selected(&self) -> usize {
         self.scope_selected
+    }
+
+    /// The FR-SC-02 suggestion's row (the suggested interface).
+    pub fn scope_suggested(&self) -> usize {
+        self.scope_suggested
+    }
+
+    /// The open confirmation dialog's kind, when one is (E-2b; the
+    /// render path draws it over the Scope screen).
+    pub fn confirm_kind(&self) -> Option<&ConfirmKind> {
+        self.confirm.as_ref().map(|overlay| &overlay.kind)
+    }
+
+    /// The letters typed into the open typed-`yes` dialog (empty for
+    /// the Enter-style dialogs).
+    pub fn confirm_typed(&self) -> &str {
+        self.confirm
+            .as_ref()
+            .map_or("", |overlay| overlay.typed.as_str())
     }
 
     /// The last finished cycle, if any.
@@ -544,6 +646,7 @@ mod tests {
             is_up: true,
             is_running: true,
             is_loopback: false,
+            link_type: LinkType::Ethernet,
             class: InterfaceClass::Physical,
             eligibility: Eligibility::Eligible,
             default_gateway: gateway,
@@ -560,6 +663,7 @@ mod tests {
             is_up: true,
             is_running: true,
             is_loopback: true,
+            link_type: LinkType::Loopback,
             class: InterfaceClass::Virtual,
             eligibility: Eligibility::Ineligible(crate::net::IneligibleReason::Loopback),
             default_gateway: None,
@@ -773,6 +877,7 @@ mod tests {
             assert_eq!(entry.is_up, info.is_up());
             assert_eq!(entry.is_running, info.is_running());
             assert_eq!(entry.is_loopback, info.is_loopback());
+            assert_eq!(entry.link_type, info.link_type());
             assert_eq!(entry.class, info.class());
             assert_eq!(entry.eligibility, info.eligibility());
             assert_eq!(entry.default_gateway, info.default_gateway());
@@ -861,5 +966,33 @@ mod tests {
             &FakeClock::new(),
         );
         assert!(!state.take_dirty(), "an unknown key changes nothing");
+    }
+
+    #[test]
+    fn a_fresh_state_has_no_dialog_and_the_session_cap() {
+        // E-2b/E-2d defaults: no confirmation dialog is open, and the
+        // session's host cap comes from the params (the confirm path
+        // gates on it).
+        let state = AppState::with_scope_entries(
+            SessionParams::default(),
+            Vec::new(),
+            db(),
+            &FakeClock::new(),
+        )
+        .expect("defaults are valid");
+        assert!(state.confirm_kind().is_none());
+        assert_eq!(state.confirm_typed(), "");
+        assert_eq!(
+            state.max_hosts,
+            crate::model::ipv4::DEFAULT_MAX_HOSTS,
+            "FR-SC-06 default cap"
+        );
+        let raised = SessionParams {
+            max_hosts: 4_094,
+            ..SessionParams::default()
+        };
+        let state = AppState::with_scope_entries(raised, Vec::new(), db(), &FakeClock::new())
+            .expect("valid");
+        assert_eq!(state.max_hosts, 4_094);
     }
 }

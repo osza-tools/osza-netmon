@@ -7,7 +7,7 @@
 //! `update(state, event, clock)` is pure — no I/O, no threads, no
 //! channels — so everything with a side effect comes back as an
 //! [`Effect`] that the runtime executes through the
-//! [`EffectsExecutor`] trait. Two effects exist:
+//! [`EffectsExecutor`] trait. The effects are:
 //!
 //! * [`Effect::StartScan`] — hand one discovery cycle to the T-204
 //!   orchestrator. Built exclusively from scheduler decisions (the
@@ -17,6 +17,13 @@
 //!   listen_window: DEFAULT_LISTEN_WINDOW }`.
 //! * [`Effect::ResolveHostname`] — queue one reverse lookup on the
 //!   T-203 worker.
+//! * [`Effect::PersistNoticeAck`] (task T-302's E-2a) — persist the
+//!   notice acknowledgment (ADR-004/013: the MVP's sole persisted
+//!   state). Emitted by `update` exactly once, when `y` acknowledges
+//!   the notice; executed by the **wiring** (the assembly's executor
+//!   interceptor, which owns the ui layer's ack store — file I/O never
+//!   lives in `src/app/`, §8.2). A write failure is non-fatal by
+//!   ADR-004 ("asks again next run").
 //!
 //! **There is no `CancelScan` effect.** User quit is the only cancel
 //! path: the runtime's shutdown sequence (`DiscoveryWorker::shutdown`
@@ -67,6 +74,16 @@ pub enum Effect {
     ResolveHostname {
         /// The address to look up.
         ip: Ipv4Addr,
+    },
+    /// Persist the notice acknowledgment (task T-302's E-2a;
+    /// ADR-004/ADR-013 — the sole persisted state of the MVP).
+    /// Emitted by `update` exactly once, when `y` acknowledges the
+    /// notice; the wiring executes it against the ack store
+    /// (the ui layer's ack store, mode `0600`, non-fatal failures).
+    PersistNoticeAck {
+        /// The notice text version acknowledged
+        /// ([`NOTICE_VERSION`](super::config::NOTICE_VERSION)).
+        version: u32,
     },
     /// The user asked to quit. Informational —
     /// [`AppState::quit`](super::AppState::quit) is authoritative;
@@ -149,6 +166,23 @@ pub trait EffectsExecutor {
     /// second call is a no-op, never a panic (the runtime may call it
     /// on quit and again on drop).
     fn shutdown(&mut self) {}
+
+    /// Swaps the discovery worker post-confirmation (task T-302's
+    /// E-2c, the PQ-3 attach surface, option (i) of the card: a
+    /// Runtime/executor method to swap the discovery worker and its
+    /// event stream). Called by
+    /// [`Runtime::attach_discovery`](super::runtime::Runtime::attach_discovery)
+    /// exactly once, after the scope confirmation selects the
+    /// confirmed interface's worker.
+    ///
+    /// The default implementation is the honest fallback for
+    /// executors that own no discovery worker to swap (the test
+    /// recording executor inherits it): the stray handle is shut
+    /// down, never leaked or dropped un-joined.
+    fn attach_discovery(&mut self, worker: DiscoveryWorker) -> Result<(), EffectError> {
+        worker.shutdown();
+        Ok(())
+    }
 }
 
 /// The production executor: owns the T-204 orchestrator handle and the
@@ -203,6 +237,15 @@ impl EffectsExecutor for WorkerExecutor {
                 };
                 worker.try_resolve(ip).map_err(EffectError::ResolveHostname)
             }
+            // E-2a: the bare worker executor has no ack store — the
+            // assembly's executor interceptor owns the persistence
+            // (the ui layer's ack store; file I/O never lives in
+            // `src/app/`, §8.2).
+            // Reaching this arm means no wiring intercepted the
+            // effect, so there is honestly nothing to persist here;
+            // the effect is satisfied as a no-op (never an error —
+            // ADR-004 makes the write non-fatal).
+            Effect::PersistNoticeAck { .. } => Ok(()),
             // Informational (documented above): the state flag governs.
             Effect::Quit => Ok(()),
         }
@@ -236,6 +279,17 @@ impl EffectsExecutor for WorkerExecutor {
             worker.shutdown();
             self.hostname = None;
         }
+    }
+
+    fn attach_discovery(&mut self, worker: DiscoveryWorker) -> Result<(), EffectError> {
+        // E-2c: shut the placeholder (dormant) worker down and take
+        // over the confirmed interface's worker — the swap is bounded
+        // by the same T-204 join the shutdown sequence uses.
+        if let Some(dormant) = self.discovery.take() {
+            dormant.shutdown();
+        }
+        self.discovery = Some(worker);
+        Ok(())
     }
 }
 
@@ -291,5 +345,23 @@ mod tests {
         // The default worker_stats of an executor without workers is
         // honestly zeroed (§5.4: counters refreshed by the runtime).
         assert_eq!(executor.worker_stats(), WorkerStats::default());
+    }
+
+    #[test]
+    fn the_notice_ack_effect_is_a_no_op_on_the_bare_worker_executor() {
+        // E-2a: the persistence lives in the wiring's interceptor
+        // (the ui layer's ack store through the assembly's executor),
+        // never here —
+        // the bare worker executor satisfies the effect as a no-op,
+        // and a no-op is success, never an error (ADR-004: the write
+        // is non-fatal; a spurious failure message would be noise).
+        let mut executor = AnsweringExecutor {
+            answer: Ok(()),
+            seen: Vec::new(),
+        };
+        assert_eq!(
+            executor.execute(Effect::PersistNoticeAck { version: 1 }),
+            Ok(())
+        );
     }
 }

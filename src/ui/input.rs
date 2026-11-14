@@ -174,7 +174,7 @@ pub fn map_event(event: Event) -> Option<AppEvent> {
 }
 
 /// The §10.3 key map (pure): the crossterm key event onto the app's
-/// [`Key`], or `None` for everything outside §10.3.
+/// [`Key`], or `None` for everything the vocabulary does not know.
 ///
 /// * Only physical presses and auto-repeats act; `Release` events
 ///   (kitty-protocol terminals) are ignored.
@@ -183,8 +183,14 @@ pub fn map_event(event: Event) -> Option<AppEvent> {
 /// * The §10.3 specials act as plain presses only — a shifted or
 ///   otherwise modified arrow/page/home/enter/esc is a different key,
 ///   outside the map.
-/// * The letter keys accept `Shift` because their shifted glyphs
-///   (`G`, `?`) arrive with it on standard layouts; every other
+/// * **Plain alphanumeric glyphs pass through** (task T-302's E-2b
+///   reach): the FR-SC-07 typed-`yes` dialog accumulates letters —
+///   `y`, `e`, `s` — and the input thread is exactly where they would
+///   be lost if the map filtered to §10.3's navigation letters. The
+///   app core ignores keys with no binding on the active screen
+///   (T-205's tested behavior), so the wider pass-through changes no
+///   navigation semantics. `Shift` is accepted because the shifted
+///   glyphs (`G`) arrive with it on standard layouts; every other
 ///   modifier combination is rejected up front.
 pub fn map_key(key: KeyEvent) -> Option<Key> {
     if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
@@ -212,11 +218,14 @@ pub fn map_key(key: KeyEvent) -> Option<Key> {
         KeyCode::End if plain => Some(Key::End),
         KeyCode::Enter if plain => Some(Key::Enter),
         KeyCode::Esc if plain => Some(Key::Esc),
-        KeyCode::Char(letter @ ('j' | 'k' | 'g' | 'G' | 'r' | 's' | 'q' | 'y' | '?'))
-            if plain || shifted =>
-        {
+        // Every plain/shifted alphanumeric glyph rides `Char(char)` —
+        // the typed-`yes` letters included (T-302's E-2b; §10.3's
+        // navigation letters are a subset).
+        KeyCode::Char(letter) if (plain || shifted) && letter.is_ascii_alphanumeric() => {
             Some(Key::Char(letter))
         }
+        // The §10.3 punctuation (`?`) keeps its shifted pass-through.
+        KeyCode::Char(letter @ '?') if plain || shifted => Some(Key::Char(letter)),
         _ => None,
     }
 }
@@ -289,12 +298,29 @@ mod tests {
     }
 
     #[test]
+    fn every_plain_letter_reaches_the_queue_including_the_yes_typing() {
+        // T-302's E-2b regression: the FR-SC-07 typed-`yes` dialog
+        // accumulates the letters `y`, `e`, `s` — the input thread is
+        // where they would be lost if the map filtered to §10.3's
+        // navigation letters (`e` is not one of them). Every plain
+        // alphanumeric glyph must reach the queue; the app core
+        // ignores keys with no binding on the active screen.
+        for letter in ['y', 'e', 's', 'a', 'z', 'E', '0', '9'] {
+            assert_eq!(
+                map_key(key(KeyCode::Char(letter))),
+                Some(Key::Char(letter)),
+                "the typed-`yes` letter {letter:?} must pass through"
+            );
+        }
+        // The punctuation outside §10.3 still does not.
+        assert_eq!(map_key(key(KeyCode::Char('!'))), None);
+        assert_eq!(map_key(key(KeyCode::Char('/'))), None);
+    }
+
+    #[test]
     fn unknown_keys_and_modifiers_are_ignored_without_error() {
-        // Letters and specials outside §10.3 …
+        // Specials outside §10.3 …
         for code in [
-            KeyCode::Char('x'),
-            KeyCode::Char('z'),
-            KeyCode::Char('Q'),
             KeyCode::F(1),
             KeyCode::Tab,
             KeyCode::BackTab,

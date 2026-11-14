@@ -59,9 +59,15 @@ pub mod state;
 pub mod update;
 
 pub use action::{Effect, EffectError, EffectsExecutor, WorkerExecutor, WorkerStats};
-pub use config::{AppInitError, AppMode, SessionParams};
+pub use config::{AppInitError, AppMode, NOTICE_VERSION, SessionParams};
 pub use event::{AppEvent, InputEvent, Key};
 pub use message::{MESSAGE_LOG_CAPACITY, Message, MessageKind, MessageLog};
 pub use runtime::{APP_EVENT_CAPACITY, AppEventSender, MAX_WAIT, RecordingExecutor, Runtime};
-pub use state::{AppState, ConfirmedScope, CountersSnapshot, LastScan, ScopeEntry, Screen};
+pub use state::{
+    AppState, ConfirmKind, ConfirmOverlay, ConfirmedScope, CountersSnapshot, LastScan, ScopeEntry,
+    Screen,
+};
 pub use update::update;
+pub use update::{
+    estimate_duration, initial_request_count, is_local_use_network, probe_target_count,
+};

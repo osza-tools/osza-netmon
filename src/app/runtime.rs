@@ -281,6 +281,12 @@ pub struct Runtime<E: EffectsExecutor> {
     state: AppState,
     executor: E,
     events: Receiver<AppEvent>,
+    /// A spare clone of the bounded queue's sending end, so
+    /// [`attach_discovery`](Self::attach_discovery) can mint a fresh
+    /// forwarder over the **same** queue after the swap (std offers no
+    /// `Receiver::sender`; the original sender lives in the returned
+    /// [`AppEventSender`] handle).
+    spare_sender: SyncSender<AppEvent>,
     clock: Arc<dyn Clock + Send + Sync>,
     /// Effects `update` produced this iteration, awaiting step 5.
     pending: Vec<Effect>,
@@ -291,6 +297,18 @@ pub struct Runtime<E: EffectsExecutor> {
     /// The discovery forwarder's join handle (`None` once joined or if
     /// the spawn failed — see the module docs).
     forwarder_thread: Option<JoinHandle<()>>,
+    /// Drops counted by forwarders that were retired by
+    /// [`attach_discovery`](Self::attach_discovery) (task T-302's
+    /// E-2c): the snapshot keeps the session's history honest.
+    forwarder_drops_base: u64,
+    /// Whether the construction-time discovery worker is the
+    /// session's worker (`true` after [`Runtime::new`]; `false` after
+    /// [`Runtime::new_detached`](Self::new_detached) until
+    /// [`attach_discovery`](Self::attach_discovery) swaps the
+    /// confirmed interface's worker in — the PQ-3 fix: the scheduler
+    /// poll stays suppressed while the construction-time worker is a
+    /// placeholder, so the first Initial scan can never run on it).
+    discovery_attached: bool,
     /// Set when the queue's last sender is gone (documented in
     /// `run_until_quit`).
     queue_disconnected: bool,
@@ -304,15 +322,46 @@ impl<E: EffectsExecutor> Runtime<E> {
     /// over) and the shared clock.
     ///
     /// Returns the runtime and the queue's sending end (what T-301's
-    /// input thread will hold).
+    /// input thread will hold). The construction-time discovery worker
+    /// is the session's worker (T-205 semantics; the PQ-3 assembly
+    /// uses [`new_detached`](Self::new_detached) instead).
     pub fn new(
         state: AppState,
         executor: E,
         discovery_events: Receiver<CycleEvent>,
         clock: Arc<dyn Clock + Send + Sync>,
     ) -> (Self, AppEventSender) {
+        Self::build(state, executor, discovery_events, clock, true)
+    }
+
+    /// The PQ-3 variant of the construction (task T-302's E-2c): the
+    /// discovery worker handed here is a **placeholder** (the dormant
+    /// read-only handle of the T-301 assembly shape) until the scope
+    /// confirmation selects the confirmed interface's worker through
+    /// [`attach_discovery`](Self::attach_discovery). The scheduler
+    /// poll stays suppressed while detached, so no cycle — in
+    /// particular the first Initial scan — can ever start on the
+    /// placeholder (the T-302 card §5.7.3: "no dormant-worker cycle").
+    pub fn new_detached(
+        state: AppState,
+        executor: E,
+        placeholder_events: Receiver<CycleEvent>,
+        clock: Arc<dyn Clock + Send + Sync>,
+    ) -> (Self, AppEventSender) {
+        Self::build(state, executor, placeholder_events, clock, false)
+    }
+
+    /// The shared construction.
+    fn build(
+        state: AppState,
+        executor: E,
+        discovery_events: Receiver<CycleEvent>,
+        clock: Arc<dyn Clock + Send + Sync>,
+        discovery_attached: bool,
+    ) -> (Self, AppEventSender) {
         let (queue_tx, queue_rx) = sync_channel::<AppEvent>(APP_EVENT_CAPACITY);
         let sender = AppEventSender { queue: queue_tx };
+        let spare_sender = sender.queue.clone();
         let forwarder = Arc::new(ForwarderState::default());
         let forwarder_thread = thread::Builder::new()
             .name(FORWARDER_THREAD_NAME.to_owned())
@@ -326,11 +375,14 @@ impl<E: EffectsExecutor> Runtime<E> {
             state,
             executor,
             events: queue_rx,
+            spare_sender,
             clock,
             pending: Vec::new(),
             tick_anchor: Instant::now(),
             forwarder,
             forwarder_thread,
+            forwarder_drops_base: 0,
+            discovery_attached,
             queue_disconnected: false,
             shut_down: false,
         };
@@ -415,11 +467,12 @@ impl<E: EffectsExecutor> Runtime<E> {
             }
         }
 
-        // 4. The scheduler poll (only when armed and alive; the
-        //    single-commander contract makes AlreadyInProgress
-        //    impossible here, and AutoScansStopped arrives via
-        //    cycle_finished — §5.8).
-        if self.state.discovery_armed && !self.state.quit {
+        // 4. The scheduler poll (only when armed, alive and **attached**
+        //    — a detached runtime's placeholder worker must never run
+        //    the first cycle; the single-commander contract makes
+        //    AlreadyInProgress impossible here, and AutoScansStopped
+        //    arrives via cycle_finished — §5.8).
+        if self.state.discovery_armed && !self.state.quit && self.discovery_attached {
             match self.state.scheduler.poll(self.clock.now()) {
                 SchedulerDecision::StartCycle { trigger, .. } => {
                     self.execute_effect(Effect::StartScan {
@@ -512,13 +565,77 @@ impl<E: EffectsExecutor> Runtime<E> {
         self.state.counters = super::state::CountersSnapshot {
             orchestrator: worker.orchestrator,
             hostname: worker.hostname,
-            forwarder_dropped_batches: self.forwarder.dropped_batches.load(Ordering::Relaxed),
+            forwarder_dropped_batches: self.forwarder_drops_base
+                + self.forwarder.dropped_batches.load(Ordering::Relaxed),
             // Deviation D-2: no hostname forwarder exists, so this
             // counter is structurally zero; the worker's own
             // `events_dropped` is the authoritative hostname-drop
             // counter (visible as `counters.hostname.events_dropped`).
             forwarder_dropped_hostnames: 0,
         };
+    }
+
+    /// Swaps the session's discovery worker post-confirmation (task
+    /// T-302's E-2c, option (i) of the card — the PQ-3 fix):
+    ///
+    /// 1. the placeholder forwarder is stopped and joined (its drops,
+    ///    if any, roll into the snapshot's base — the placeholder was
+    ///    never commanded, so this is the defensive path);
+    /// 2. a fresh forwarder is spawned over `events`, the confirmed
+    ///    interface's worker stream;
+    /// 3. the executor swaps its worker handle
+    ///    ([`EffectsExecutor::attach_discovery`]);
+    /// 4. the scheduler poll is un-suppressed — the next `step`'s
+    ///    poll issues the first Initial scan on the **confirmed**
+    ///    interface's worker.
+    ///
+    /// Idempotent in the harmless direction: a second call swaps
+    /// again (the confirmation path calls it exactly once). A failed
+    /// forwarder spawn degrades exactly like the construction-time
+    /// one (module docs): the handle is `None`, events stop flowing,
+    /// shutdown joins what exists.
+    ///
+    /// # Errors
+    /// The executor's typed rejection ([`EffectError`]), verbatim.
+    pub fn attach_discovery(
+        &mut self,
+        worker: crate::discovery::worker::DiscoveryWorker,
+        events: Receiver<CycleEvent>,
+    ) -> Result<(), EffectError> {
+        // 1. Retire the placeholder forwarder: flag, join, keep its
+        //    counted drops.
+        self.forwarder.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.forwarder_thread.take() {
+            let _ = thread.join();
+        }
+        self.forwarder_drops_base += self.forwarder.dropped_batches.load(Ordering::Relaxed);
+        // 2. The fresh forwarder over the confirmed worker's stream.
+        let forwarder = Arc::new(ForwarderState::default());
+        let sender = AppEventSender {
+            queue: self.events_forwarder_sender(),
+        };
+        self.forwarder_thread = thread::Builder::new()
+            .name(FORWARDER_THREAD_NAME.to_owned())
+            .spawn({
+                let forwarder = Arc::clone(&forwarder);
+                let sender = sender.clone();
+                move || forward_discovery(events, sender, forwarder)
+            })
+            .ok();
+        self.forwarder = forwarder;
+        // 3. The executor's swap, then 4. the poll gate opens.
+        self.executor.attach_discovery(worker)?;
+        self.discovery_attached = true;
+        Ok(())
+    }
+
+    /// A clone of the bounded queue's sending end for a fresh
+    /// forwarder: the receiver stays owned by `self.events`, and the
+    /// spare clone opens the **same** channel to the new thread
+    /// (the original sender lives on in the returned
+    /// [`AppEventSender`] handle).
+    fn events_forwarder_sender(&self) -> SyncSender<AppEvent> {
+        self.spare_sender.clone()
     }
 
     /// The bounded shutdown sequence (module docs): executor first
@@ -565,6 +682,10 @@ impl<E: EffectsExecutor> Drop for Runtime<E> {
 pub struct RecordingExecutor {
     recorded: Mutex<Vec<Effect>>,
     fail_starts: Option<EffectError>,
+    /// How many discovery-worker attaches were requested (task T-302's
+    /// E-2c ordering evidence: the first `StartScan` must come after
+    /// this count reaches 1).
+    attaches: AtomicU64,
 }
 
 impl RecordingExecutor {
@@ -578,6 +699,7 @@ impl RecordingExecutor {
         RecordingExecutor {
             recorded: Mutex::new(Vec::new()),
             fail_starts: Some(error),
+            attaches: AtomicU64::new(0),
         }
     }
 
@@ -596,6 +718,11 @@ impl RecordingExecutor {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
     }
+
+    /// How many discovery-worker attaches were requested (E-2c).
+    pub fn attach_count(&self) -> u64 {
+        self.attaches.load(Ordering::Relaxed)
+    }
 }
 
 impl EffectsExecutor for RecordingExecutor {
@@ -608,6 +735,18 @@ impl EffectsExecutor for RecordingExecutor {
             (Effect::StartScan { .. }, Some(error)) => Err(error.clone()),
             _ => Ok(()),
         }
+    }
+
+    fn attach_discovery(
+        &mut self,
+        worker: crate::discovery::worker::DiscoveryWorker,
+    ) -> Result<(), EffectError> {
+        // E-2c: count the attach (the ordering evidence), then the
+        // default policy — this executor owns no worker to swap, so
+        // the stray handle is shut down, never leaked.
+        self.attaches.fetch_add(1, Ordering::Relaxed);
+        worker.shutdown();
+        Ok(())
     }
 }
 
@@ -633,6 +772,7 @@ mod tests {
     use crate::discovery::worker::CycleMode;
     use crate::discovery::worker::CycleSummary;
     use crate::discovery::worker::OrchestratorError;
+    use crate::enrichment::worker::HostnameWorker;
     use crate::model::FakeClock;
     use crate::model::Field;
     use crate::model::Hostname;
@@ -641,6 +781,7 @@ mod tests {
     use crate::model::Source;
     use crate::net::Eligibility;
     use crate::net::InterfaceClass;
+    use crate::net::LinkType;
     use crate::registry::DeviceKey;
     use crate::registry::SortMode;
     use crate::registry::Tag;
@@ -669,6 +810,7 @@ mod tests {
             is_up: true,
             is_running: true,
             is_loopback: false,
+            link_type: LinkType::Ethernet,
             class: InterfaceClass::Physical,
             eligibility: Eligibility::Eligible,
             default_gateway: Some(Ipv4Addr::new(192, 0, 2, 6)),
@@ -715,7 +857,10 @@ mod tests {
     }
 
     /// A state confirmed through the pure core (the realistic T-301
-    /// assembly order: build, confirm, then wire the runtime).
+    /// assembly order: build, confirm, then wire the runtime). The
+    /// synthetic fixture's 192.0.2.0/29 is an RFC 5737 documentation
+    /// range — a public network — so the confirmation walks the
+    /// FR-SC-07 typed-`yes` dialog (`Enter`, `yes`, `Enter`).
     fn confirmed_state(clock: &dyn Clock) -> AppState {
         let mut state =
             AppState::with_scope_entries(SessionParams::default(), vec![eth_entry()], db(), clock)
@@ -726,7 +871,24 @@ mod tests {
             AppEvent::Input(InputEvent::Key(Key::Char('y'))),
             &pure_clock,
         );
-        assert!(effects.is_empty());
+        assert_eq!(
+            effects,
+            vec![Effect::PersistNoticeAck { version: 1 }],
+            "E-2a: `y` persists the ack exactly once"
+        );
+        let effects = update(
+            &mut state,
+            AppEvent::Input(InputEvent::Key(Key::Enter)),
+            &pure_clock,
+        );
+        assert!(effects.is_empty(), "the FR-SC-07 dialog opens first");
+        for letter in ['y', 'e', 's'] {
+            update(
+                &mut state,
+                AppEvent::Input(InputEvent::Key(Key::Char(letter))),
+                &pure_clock,
+            );
+        }
         let effects = update(
             &mut state,
             AppEvent::Input(InputEvent::Key(Key::Enter)),
@@ -1028,7 +1190,13 @@ mod tests {
         let (mut runtime, sender) = Runtime::new(state, executor, discovery_events, clock);
 
         // Confirm the scope through the real queue; the confirm's own
-        // ResolveHostname effect reaches the real hostname worker.
+        // ResolveHostname effect reaches the real hostname worker. The
+        // fixture's RFC 5737 range is public, so the FR-SC-07 typed
+        // `yes` dialog is part of the realistic path.
+        send(&sender, AppEvent::Input(InputEvent::Key(Key::Enter)));
+        for letter in ['y', 'e', 's'] {
+            send(&sender, AppEvent::Input(InputEvent::Key(Key::Char(letter))));
+        }
         send(&sender, AppEvent::Input(InputEvent::Key(Key::Enter)));
         runtime.step(Duration::ZERO);
         assert!(runtime.state().discovery_armed());
@@ -1175,6 +1343,8 @@ mod tests {
         // Confirm (no local device: the entry has no MAC — the
         // documented no-identity path — so the registry below holds
         // exactly the 4,096 synthetic devices, at the ADR-008 cap).
+        // The MAC-less entry is not active-confirmable, so the FR-SC-07
+        // dialog never opens: one `Enter` completes read-only.
         let _ = update(
             &mut state,
             AppEvent::Input(InputEvent::Key(Key::Enter)),
@@ -1308,6 +1478,206 @@ mod tests {
             "the re-observations merged; no cap drop occurred"
         );
         assert!(!runtime.state().registry.cap_warning());
+        drop(runtime);
+    }
+
+    // ---- task T-302, E-2c: the PQ-3 attach ordering -----------------------
+
+    /// A fake neighbor source: one complete entry inside the given
+    /// scope (the T-205 ac5 shape).
+    struct OneHostNeighbors {
+        table: String,
+    }
+
+    impl crate::discovery::NeighborSource for OneHostNeighbors {
+        fn read_neighbors(
+            &self,
+            _scope: &crate::model::Ipv4Net,
+            _interface_name: &str,
+        ) -> Result<Vec<crate::discovery::NeighborEntry>, crate::discovery::NeighborError> {
+            Ok(crate::discovery::parse_arp_table(&self.table))
+        }
+    }
+
+    #[test]
+    fn e2c_no_scan_starts_while_detached_the_first_follows_the_attach() {
+        // The PQ-3 ordering (§5.7.3): a detached runtime's
+        // construction-time worker is a placeholder — the scheduler
+        // poll stays suppressed after the confirmation, so no
+        // StartScan is ever issued on it; the attach swaps the
+        // worker, and the next step's poll issues the first Initial
+        // scan (which therefore runs on the confirmed interface's
+        // worker, never the suggestion's).
+        let clock: Arc<dyn Clock + Send + Sync> =
+            Arc::new(SharedFakeClock(Arc::new(StdMutex::new(FakeClock::new()))));
+        let state = AppState::with_scope_entries(
+            SessionParams::default(),
+            vec![eth_entry()],
+            db(),
+            clock.as_ref(),
+        )
+        .expect("valid");
+        let (mut runtime, sender) = Runtime::new_detached(
+            state,
+            RecordingExecutor::new(),
+            dummy_discovery_receiver(),
+            Arc::clone(&clock),
+        );
+        // Confirm through the real queue (the fixture's RFC 5737 range
+        // is public: the FR-SC-07 typed-`yes` dialog is the path).
+        send(&sender, AppEvent::Input(InputEvent::Key(Key::Char('y'))));
+        send(&sender, AppEvent::Input(InputEvent::Key(Key::Enter)));
+        for letter in ['y', 'e', 's'] {
+            send(&sender, AppEvent::Input(InputEvent::Key(Key::Char(letter))));
+        }
+        send(&sender, AppEvent::Input(InputEvent::Key(Key::Enter)));
+        runtime.step(Duration::ZERO);
+        // The confirmation landed… and NO StartScan exists: the
+        // placeholder must never run the first cycle.
+        assert!(runtime.state().discovery_armed());
+        assert_eq!(runtime.executor.attach_count(), 0);
+        assert!(
+            !runtime
+                .executor
+                .recorded()
+                .iter()
+                .any(|effect| matches!(effect, Effect::StartScan { .. })),
+            "no scan may start on the placeholder: {:?}",
+            runtime.executor.recorded()
+        );
+        // The scheduler is still holding its fresh Immediately slot.
+        assert_eq!(
+            runtime.state().scheduler.next_auto_in(clock.now()),
+            Some(Duration::ZERO)
+        );
+        // The attach (E-2c): a real read-only worker for the
+        // confirmed interface.
+        let scope = crate::model::Ipv4Net::new(Ipv4Addr::new(192, 0, 2, 0), 29).expect("scope");
+        let (worker, events) = DiscoveryWorker::spawn_read_only(
+            Box::new(OneHostNeighbors {
+                table: "IP address HW type Flags HW address Mask Device\n\
+                        192.0.2.5 0x1 0x2 02:00:00:00:00:05 * eth9\n"
+                    .to_owned(),
+            }),
+            scope,
+            "eth9",
+        );
+        runtime
+            .attach_discovery(worker, events)
+            .expect("the attach");
+        assert_eq!(runtime.executor.attach_count(), 1);
+        // The next step's poll issues the first Initial scan — after
+        // the attach, by the counts above.
+        runtime.step(Duration::ZERO);
+        let starts: Vec<Effect> = runtime
+            .executor
+            .recorded()
+            .into_iter()
+            .filter(|effect| matches!(effect, Effect::StartScan { .. }))
+            .collect();
+        assert_eq!(starts.len(), 1, "exactly the one Initial start");
+        assert!(matches!(
+            starts.first(),
+            Some(Effect::StartScan {
+                trigger: Trigger::Initial,
+                ..
+            })
+        ));
+        assert_eq!(runtime.executor.attach_count(), 1);
+        drop(runtime);
+    }
+
+    #[test]
+    fn e2c_the_attached_workers_events_flow_through_the_swapped_stream() {
+        // The event-stream half of the swap: after the attach, the
+        // confirmed interface's worker runs its cycle and its
+        // observations reach the registry through the fresh forwarder
+        // (the placeholder's stream is retired).
+        let clock: Arc<dyn Clock + Send + Sync> =
+            Arc::new(SharedFakeClock(Arc::new(StdMutex::new(FakeClock::new()))));
+        let state = AppState::with_scope_entries(
+            SessionParams::default(),
+            vec![eth_entry()],
+            db(),
+            clock.as_ref(),
+        )
+        .expect("valid");
+        // A production executor around the placeholder worker.
+        let (placeholder, placeholder_events) = DiscoveryWorker::spawn_read_only(
+            Box::new(OneHostNeighbors {
+                table: "IP address HW type Flags HW address Mask Device\n\
+                        192.0.2.9 0x1 0x2 02:00:00:00:00:09 * eth9\n"
+                    .to_owned(),
+            }),
+            crate::model::Ipv4Net::new(Ipv4Addr::new(192, 0, 2, 0), 29).expect("scope"),
+            String::new(), // the placeholder's filter matches nothing
+        );
+        let hostname = HostnameWorker::spawn(
+            Default::default(),
+            None,
+            Arc::clone(&clock),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("spawn");
+        let executor = WorkerExecutor::new(placeholder, hostname);
+        let (mut runtime, sender) =
+            Runtime::new_detached(state, executor, placeholder_events, Arc::clone(&clock));
+        // Confirm through the queue (public range: typed yes).
+        send(&sender, AppEvent::Input(InputEvent::Key(Key::Char('y'))));
+        send(&sender, AppEvent::Input(InputEvent::Key(Key::Enter)));
+        for letter in ['y', 'e', 's'] {
+            send(&sender, AppEvent::Input(InputEvent::Key(Key::Char(letter))));
+        }
+        send(&sender, AppEvent::Input(InputEvent::Key(Key::Enter)));
+        runtime.step(Duration::ZERO);
+        assert!(runtime.state().discovery_armed());
+        // Attach the confirmed interface's worker (a read-only one
+        // over a one-host table, per §5.7.4's late binding).
+        let scope = crate::model::Ipv4Net::new(Ipv4Addr::new(192, 0, 2, 0), 29).expect("scope");
+        let (worker, events) = DiscoveryWorker::spawn_read_only(
+            Box::new(OneHostNeighbors {
+                table: "IP address HW type Flags HW address Mask Device\n\
+                        192.0.2.5 0x1 0x2 02:00:00:00:00:05 * eth9\n"
+                    .to_owned(),
+            }),
+            scope,
+            "eth9",
+        );
+        runtime
+            .attach_discovery(worker, events)
+            .expect("the attach");
+        // Step until the cycle's observations land (bounded poll; the
+        // placeholder's .9 host must never appear — its stream is
+        // retired and its filter matched nothing anyway).
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while runtime.state().registry.device_count() < 2 && Instant::now() < deadline {
+            runtime.step(Duration::from_millis(20));
+        }
+        let devices = runtime.state().registry.device_count();
+        assert_eq!(
+            devices, 2,
+            "the local device plus the attached worker's one host"
+        );
+        // The attached worker's host is present…
+        assert!(
+            runtime
+                .state()
+                .registry
+                .iter()
+                .any(|device| device.has_ip(Ipv4Addr::new(192, 0, 2, 5))),
+            "the confirmed interface's neighbor arrived"
+        );
+        // …and the placeholder's never did.
+        assert!(
+            !runtime
+                .state()
+                .registry
+                .iter()
+                .any(|device| device.has_ip(Ipv4Addr::new(192, 0, 2, 9))),
+            "the placeholder's stream is retired"
+        );
+        send(&sender, AppEvent::Input(InputEvent::Key(Key::Char('q'))));
+        runtime.step(Duration::ZERO);
         drop(runtime);
     }
 }

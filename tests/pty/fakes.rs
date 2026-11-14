@@ -12,11 +12,27 @@
 #![allow(clippy::print_stderr)]
 
 //! The fake-source session (§6's "the T-205 AC-5 fake-source variant
-//! under the pty"): the real terminal lifecycle — threads, terminal,
-//! loop, teardown — around the real workers over the reviewed fake
-//! sources (a synthetic neighbor table and a scripted resolver), the
-//! exact shape of T-205's runtime integration test. Spawned by the
-//! scenario runner as `tests/pty --fake-session` under `script(1)`.
+//! under the pty", reworked for T-302): the real terminal lifecycle —
+//! threads, terminal, loop, teardown — around the **same PQ-3 attach
+//! machinery as the real assembly** ([`run_with`]), with two synthetic
+//! interfaces whose discovery workers are fake read-only ones:
+//!
+//! * `eth9` — 192.0.2.1/29 (the RFC 5737 documentation range, a
+//!   public network, so confirms walk the FR-SC-07 typed-`yes`
+//!   dialog), the *suggested* row, whose fake neighbor table holds
+//!   **three** hosts;
+//! * `wlan9` — 198.51.100.129/25, the second eligible row, whose fake
+//!   neighbor table holds **one** host.
+//!
+//! The pty flow scenario confirms the **non-suggested** `wlan9` and
+//! asserts the exact device count (the local device plus wlan9's one
+//! neighbor = 2; a scan on the wrong interface would show 4, a
+//! missing attach 1) — the PQ-3 attach decided through the real loop.
+//!
+//! The session also carries the real notice-ack wiring: the store is
+//! read at startup (the harness isolates `XDG_CONFIG_HOME` per
+//! scenario) and the E-2a effect writes through the assembled
+//! executor.
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
@@ -32,7 +48,6 @@ use osza_netmon::discovery::DiscoveryWorker;
 use osza_netmon::discovery::NeighborError;
 use osza_netmon::discovery::NeighborSource;
 use osza_netmon::discovery::parse_arp_table;
-use osza_netmon::discovery::worker::CycleEvent;
 use osza_netmon::enrichment::dns::NameResolver;
 use osza_netmon::enrichment::dns::ResolveError;
 use osza_netmon::enrichment::worker::HostnameWorker;
@@ -42,14 +57,14 @@ use osza_netmon::model::Hostname;
 use osza_netmon::model::Ipv4Net;
 use osza_netmon::net::Eligibility;
 use osza_netmon::net::InterfaceClass;
+use osza_netmon::net::LinkType;
+use osza_netmon::ui::ack::AckStore;
+use osza_netmon::ui::assembly::AssembledExecutor;
 use osza_netmon::ui::assembly::AssemblyParams;
+use osza_netmon::ui::assembly::PendingDiscovery;
 use osza_netmon::ui::assembly::run_with;
 
-/// The synthetic scope of the T-205 fixtures: 192.0.2.0/29 over `eth9`.
-const SCOPE_NETWORK: (Ipv4Addr, u8) = (Ipv4Addr::new(192, 0, 2, 0), 29);
-
-/// The fake neighbor table (T-205's `FakeNeighbors::with_host(5)`):
-/// one complete entry for 192.0.2.5 on eth9, inside the scope.
+/// The fake neighbor table: one fixed `/proc/net/arp` image.
 struct FakeNeighbors {
     table: String,
 }
@@ -82,22 +97,109 @@ impl NameResolver for FakeResolver {
     }
 }
 
-/// Runs the assembled application over the fakes on this process's
-/// stdio (the pty). Exits 0 on a clean quit, non-zero on any failure
-/// (the assembly restores the terminal on every path).
+/// One synthetic interface of the fake session.
+fn entry(name: &str, index: u32, mac: &str, ipv4: (Ipv4Addr, u8)) -> ScopeEntry {
+    ScopeEntry {
+        name: name.to_owned(),
+        index,
+        mac: Some(mac.parse().expect("valid MAC")),
+        ipv4: Some(ipv4),
+        is_up: true,
+        is_running: true,
+        is_loopback: false,
+        link_type: LinkType::Ethernet,
+        class: InterfaceClass::Physical,
+        eligibility: Eligibility::Eligible,
+        default_gateway: None,
+    }
+}
+
+/// A three-host neighbor table for `eth9`'s 192.0.2.0/29 scope
+/// (hosts .2–.4; the own address is .1).
+fn eth9_table() -> String {
+    let header = "IP address HW type Flags HW address Mask Device\n";
+    let rows = [
+        ("192.0.2.2", "02:00:00:00:00:02"),
+        ("192.0.2.3", "02:00:00:00:00:03"),
+        ("192.0.2.4", "02:00:00:00:00:04"),
+    ];
+    let mut table = String::from(header);
+    for (ip, mac) in rows {
+        table.push_str(&format!("{ip} 0x1 0x2 {mac} * eth9\n"));
+    }
+    table
+}
+
+/// A one-host neighbor table for `wlan9`'s 198.51.100.128/25 scope.
+fn wlan9_table() -> String {
+    "IP address HW type Flags HW address Mask Device\n\
+     198.51.100.130 0x1 0x2 02:00:00:00:01:30 * wlan9\n"
+        .to_owned()
+}
+
+/// Runs the assembled fake session on this process's stdio (the pty).
+/// Exits 0 on a clean quit, non-zero on any failure (the assembly
+/// restores the terminal on every path).
 pub fn run_fake_session() -> Result<(), osza_netmon::ui::assembly::AssemblyError> {
     // A shared frozen clock (the T-203 pattern): the runtime and the
     // hostname worker read the same time.
     let clock: Arc<dyn Clock + Send + Sync> = Arc::new(FakeClock::new());
 
-    // The real read-only orchestrator over the fake neighbor source,
-    // on the scope the state will confirm.
-    let scope = Ipv4Net::new(SCOPE_NETWORK.0, SCOPE_NETWORK.1).expect("valid network");
-    let table = "IP address HW type Flags HW address Mask Device\n\
-                 192.0.2.5 0x1 0x2 02:00:00:00:00:05 * eth9\n"
-        .to_owned();
-    let (discovery, discovery_events) =
-        DiscoveryWorker::spawn_read_only(Box::new(FakeNeighbors { table }), scope, "eth9");
+    // The notice-ack wiring (the harness isolates XDG_CONFIG_HOME per
+    // scenario): the first-run-or-version-change rule (O-6).
+    let ack_store = AckStore::from_env();
+    let notice_acknowledged = ack_store
+        .as_ref()
+        .is_some_and(|store| store.acknowledges(osza_netmon::app::NOTICE_VERSION));
+
+    // The two synthetic interfaces (eth9 is the suggested row — the
+    // first eligible entry; wlan9 the non-suggested one).
+    let entries = vec![
+        entry(
+            "eth9",
+            2,
+            "aa:bb:cc:dd:ee:01",
+            (Ipv4Addr::new(192, 0, 2, 1), 29),
+        ),
+        entry(
+            "wlan9",
+            3,
+            "aa:bb:cc:dd:ee:02",
+            (Ipv4Addr::new(198, 51, 100, 129), 25),
+        ),
+    ];
+    let eth9_scope =
+        Ipv4Net::new(Ipv4Addr::new(192, 0, 2, 0), 29).expect("the eth9 scope is valid");
+    let wlan9_scope =
+        Ipv4Net::new(Ipv4Addr::new(198, 51, 100, 128), 25).expect("the wlan9 scope is valid");
+
+    // The PQ-3 pending map, fakes edition: one read-only spawner per
+    // interface over its own fake neighbor table (no raw sockets in
+    // the fake session).
+    let mut pending = PendingDiscovery::new();
+    pending.insert_read_only_with(
+        "eth9".to_owned(),
+        eth9_scope,
+        Box::new(FakeNeighbors {
+            table: eth9_table(),
+        }),
+    );
+    pending.insert_read_only_with(
+        "wlan9".to_owned(),
+        wlan9_scope,
+        Box::new(FakeNeighbors {
+            table: wlan9_table(),
+        }),
+    );
+
+    // The dormant read-only placeholder (the real assembly's shape).
+    let dormant_scope =
+        Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).expect("the reserved scope is valid");
+    let (dormant, placeholder_events) = DiscoveryWorker::spawn_read_only(
+        Box::new(osza_netmon::discovery::ProcNeighborTable::new()),
+        dormant_scope,
+        String::new(),
+    );
 
     // The real hostname worker over the fake resolver.
     let hostname = HostnameWorker::spawn(
@@ -110,44 +212,28 @@ pub fn run_fake_session() -> Result<(), osza_netmon::ui::assembly::AssemblyError
     )
     .expect("spawn succeeds");
 
-    // The state: read-only mode, unacknowledged notice (the smoke
-    // drives `y`), the synthetic eligible entry matching the worker's
-    // scope — exactly the T-205 ac5 fixture.
-    let entry = ScopeEntry {
-        name: "eth9".to_owned(),
-        index: 2,
-        mac: Some("aa:bb:cc:dd:ee:01".parse().expect("valid MAC")),
-        ipv4: Some((Ipv4Addr::new(192, 0, 2, 1), 29)),
-        is_up: true,
-        is_running: true,
-        is_loopback: false,
-        class: InterfaceClass::Physical,
-        eligibility: Eligibility::Eligible,
-        default_gateway: Some(Ipv4Addr::new(192, 0, 2, 6)),
-    };
+    // The state: read-only mode, the notice per the stored ack, the
+    // two-entry scope list.
     let params = SessionParams {
         mode: AppMode::ReadOnly {
             reason: "fake-source session (no raw socket)".to_owned(),
         },
+        notice_acknowledged,
         ..SessionParams::default()
     };
     let vendor_db = Arc::new(
         osza_netmon::enrichment::vendor::VendorDb::embedded().expect("committed database is valid"),
     );
-    let state = AppState::with_scope_entries(params, vec![entry], vendor_db, clock.as_ref())
+    let state = AppState::with_scope_entries(params, entries, vendor_db, clock.as_ref())
         .expect("defaults are valid");
 
-    let executor = WorkerExecutor::new(discovery, hostname);
+    let executor = AssembledExecutor::new(WorkerExecutor::new(dormant, hostname), ack_store);
     run_with(
         AssemblyParams::default(),
         state,
         executor,
-        discovery_events,
+        placeholder_events,
+        pending,
         clock,
     )
 }
-
-// The CycleEvent import documents the receiver's payload type for
-// readers; the function below is the honest no-discovery shape any
-// future harness mode would use.
-const _: Option<CycleEvent> = None;

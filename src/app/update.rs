@@ -87,17 +87,27 @@
 //!   returning [`Effect::Quit`] (§5.3: the flag is authoritative, the
 //!   effect informational).
 //!
-//! Scope confirmation (`Enter` on Scope): the selected entry must be
-//! eligible **and** have a derivable scope (FR-SC-04); otherwise the
-//! screen stays and [`MessageKind::ScopeUnavailable`] is appended with
-//! the net layer's own eligibility words as the reason. On success the
-//! scope facts are recorded, the interface's own device is inserted
-//! with the `This device` tag (its vendor is filled per §5.9), the
-//! gateway address — when the interface carries a **real** default
-//! gateway (`Some(0.0.0.0)` is an on-link default, not a gateway
-//! address; decision, see the report) — is recorded for the `Gateway`
-//! tag, a `ResolveHostname` for our own address is queued, discovery
-//! is armed and the Dashboard opens. An eligible interface without a
+//! Scope confirmation (`Enter` on Scope; task T-302 §5.4): the selected
+//! entry must be eligible **and** have a derivable scope (FR-SC-04);
+//! otherwise the screen stays and [`MessageKind::ScopeUnavailable`] is
+//! appended with the net layer's own eligibility words as the reason.
+//! An active-confirmable selection (an active session, a valid MAC and
+//! a network with probe targets) then walks the dialog chain: the
+//! FR-SC-06 cap check — a target count above the session's cap is
+//! refused with an honest explanation (read-only remains: `Enter`
+//! continues read-only, `Esc` cancels), a count above the default cap
+//! but inside a raised cap opens the packet-count/duration
+//! confirmation — and finally FR-SC-07's typed-`yes` for a network
+//! that is not private/link-local/CGNAT. No dialog opens when none is
+//! required. On completion the scope facts are recorded (including
+//! the [`discovery_active`](super::state::ConfirmedScope::discovery_active)
+//! attach decision), the interface's own device is inserted with the
+//! `This device` tag (its vendor is filled per §5.9), the gateway
+//! address — when the interface carries a **real** default gateway
+//! (`Some(0.0.0.0)` is an on-link default, not a gateway address;
+//! decision, see the report) — is recorded for the `Gateway` tag, a
+//! `ResolveHostname` for our own address is queued, discovery is
+//! armed and the Dashboard opens. An eligible interface without a
 //! valid MAC (no identity, ADR-008) skips the local-device insertion —
 //! documented decision.
 
@@ -119,6 +129,8 @@ use crate::model::Field;
 use crate::model::MacAddr;
 use crate::model::ScanId;
 use crate::model::Source;
+use crate::model::ipv4::DEFAULT_MAX_HOSTS;
+use crate::model::ipv4::{is_cgnat, is_link_local, is_private};
 use crate::net::IneligibleReason;
 use crate::registry::DeviceKey;
 use crate::registry::Observation as RegistryObservation;
@@ -126,11 +138,14 @@ use crate::registry::ScanOutcome as RegistryOutcome;
 use crate::registry::SortMode;
 
 use super::action::Effect;
+use super::config::NOTICE_VERSION;
 use super::event::AppEvent;
 use super::event::InputEvent;
 use super::event::Key;
 use super::message::MessageKind;
 use super::state::AppState;
+use super::state::ConfirmKind;
+use super::state::ConfirmOverlay;
 use super::state::ConfirmedScope;
 use super::state::LastScan;
 use super::state::Screen;
@@ -169,13 +184,104 @@ pub fn update(state: &mut AppState, event: AppEvent, clock: &dyn Clock) -> Vec<E
 }
 
 // ---------------------------------------------------------------------------
+// Scope facts (FR-SC-05/06/08; task T-302 §5.3 — the card-fixed formulas)
+// ---------------------------------------------------------------------------
+
+/// The probe target count of `scope` for a host at `own_ip`
+/// (FR-SC-05): every usable host address except the network address,
+/// the broadcast address and the interface's own address; a `/31`
+/// counts both addresses (RFC 3021) minus the own one; a `/32` has
+/// zero probe targets.
+///
+/// Mirrors the scanner's own target generation
+/// (`discovery::arp::scanner`'s `targets`) exactly, so the number the
+/// scope screen shows is the number the sweep sends to.
+pub fn probe_target_count(scope: &crate::model::Ipv4Net, own_ip: std::net::Ipv4Addr) -> u64 {
+    match scope.prefix_len() {
+        // The single address is both network and broadcast (and the
+        // interface's own): nothing to probe (FR-SC-05, read-only
+        // only with an explanation).
+        32 => 0,
+        // Both addresses are hosts; the own one is never probed.
+        31 => 2 - u64::from(scope.contains(own_ip)),
+        // The usable host range minus the own address (the own
+        // address is a host of its own network, so the subtraction
+        // always applies; the `contains` check keeps this total
+        // regardless).
+        _ => u64::from(scope.host_count()) - u64::from(scope.contains(own_ip)),
+    }
+}
+
+/// The ARP request count of an initial active scan (FR-SC-08):
+/// targets × passes (ADR-011: the initial scan uses
+/// [`PASSES_INITIAL_AND_MANUAL`](crate::discovery::scheduler::PASSES_INITIAL_AND_MANUAL) = 2
+/// passes; the second pass goes to non-responders, so this is the
+/// worst case — every target silent).
+pub fn initial_request_count(targets: u64) -> u64 {
+    targets * u64::from(Trigger::Initial.passes())
+}
+
+/// The card-fixed duration estimate (task T-302 §5.3):
+/// `passes × (ceil(targets / rate_pps) + listen_window)`, displayed
+/// with "≈" and the word "estimated". The scanner's own pacing is
+/// interval-based (one send per `1/rate`, plus the pass gap between
+/// passes), so this estimate errs on the high side by less than one
+/// pass gap — conservative by construction, never a guess.
+pub fn estimate_duration(
+    targets: u64,
+    passes: u8,
+    rate_pps: u32,
+    listen_window: std::time::Duration,
+) -> std::time::Duration {
+    let rate = u64::from(rate_pps.max(1));
+    let send_span_secs = targets.div_ceil(rate);
+    (std::time::Duration::from_secs(send_span_secs) + listen_window) * u32::from(passes.max(1))
+}
+
+/// Whether `scope` is a private, link-local or CGNAT network
+/// (FR-SC-07: RFC 1918, 169.254/16, 100.64/10) — the networks active
+/// discovery may run on without the typed-`yes` confirmation.
+pub fn is_local_use_network(scope: &crate::model::Ipv4Net) -> bool {
+    let network = scope.network();
+    is_private(network) || is_link_local(network) || is_cgnat(network)
+}
+
+/// Whether the session may run active discovery at all (FR-DS-14:
+/// a read-only session never probes).
+fn session_active(state: &AppState) -> bool {
+    !matches!(state.mode, super::config::AppMode::ReadOnly { .. })
+}
+
+/// Whether the selected interface can be confirmed for **active**
+/// discovery: the session is active-capable, the interface reports a
+/// valid MAC (an identity to announce, ADR-008) and its network has
+/// probe targets (a `/32` is read-only only, FR-SC-05).
+fn active_confirmable(state: &AppState, entry: &super::state::ScopeEntry) -> bool {
+    session_active(state)
+        && entry.mac.is_some()
+        && entry.derive_scope().is_some_and(|scope| {
+            probe_target_count(
+                &scope,
+                entry
+                    .ipv4
+                    .map_or(std::net::Ipv4Addr::UNSPECIFIED, |(ip, _)| ip),
+            ) > 0
+        })
+}
+
+// ---------------------------------------------------------------------------
 // Input
 // ---------------------------------------------------------------------------
 
 /// The per-screen key dispatch (§5.6; module docs for the table).
 fn handle_key(state: &mut AppState, key: Key, clock: &dyn Clock) -> Vec<Effect> {
-    // Quit works from any screen, overlay included (FR-UI-06/§10.3).
-    if matches!(key, Key::Char('q') | Key::CtrlC) {
+    // Quit works from any screen, overlay included (FR-UI-06/§10.3) —
+    // with the one exception §10.3 itself carves out: while a typed
+    // `yes` confirmation is open, `q`/`Ctrl+C` do not quit (the
+    // typing context owns the letters; `Esc` cancels). Task T-302's
+    // E-2b key handling.
+    let typing_yes = matches!(state.confirm_kind(), Some(ConfirmKind::PublicRange { .. }));
+    if !typing_yes && matches!(key, Key::Char('q') | Key::CtrlC) {
         return vec![quit_now(state)];
     }
     // The help overlay is modal: Esc/? close it; all else is ignored.
@@ -211,7 +317,14 @@ fn notice_key(state: &mut AppState, key: Key) -> Vec<Effect> {
             state.notice_acknowledged = true;
             state.screen = Screen::Scope;
             state.dirty = true;
-            Vec::new()
+            // E-2a: persist the acknowledgment exactly once — the
+            // wiring's executor interceptor owns the file I/O
+            // (the ui layer's ack store, mode `0600`, non-fatal
+            // failures; ADR-004/
+            // ADR-013 — the sole persisted state of the MVP).
+            vec![Effect::PersistNoticeAck {
+                version: NOTICE_VERSION,
+            }]
         }
         // Everything else is ignored (no state change, not dirty).
         _ => Vec::new(),
@@ -219,6 +332,11 @@ fn notice_key(state: &mut AppState, key: Key) -> Vec<Effect> {
 }
 
 fn scope_key(state: &mut AppState, key: Key, clock: &dyn Clock) -> Vec<Effect> {
+    // The confirmation dialogs are modal over the Scope screen
+    // (E-2b): they capture every key while open.
+    if state.confirm.is_some() {
+        return confirm_dialog_key(state, key, clock);
+    }
     match key {
         Key::Up | Key::Char('k') => {
             move_scope_selection(state, false);
@@ -230,7 +348,7 @@ fn scope_key(state: &mut AppState, key: Key, clock: &dyn Clock) -> Vec<Effect> {
             state.dirty = true;
             Vec::new()
         }
-        Key::Enter => confirm_scope(state, clock),
+        Key::Enter => begin_confirm(state, clock),
         _ => Vec::new(),
     }
 }
@@ -274,8 +392,13 @@ fn move_scope_selection(state: &mut AppState, forward: bool) {
     }
 }
 
-/// The Scope screen's `Enter` (§5.6; module docs for the semantics).
-fn confirm_scope(state: &mut AppState, clock: &dyn Clock) -> Vec<Effect> {
+/// The Scope screen's `Enter` (§5.6; task T-302 §5.4): validate the
+/// selected entry, then walk the FR-SC-06/FR-SC-07 dialog chain —
+/// cap check (refusal / raised-cap confirmation), then the public-range
+/// typed-`yes` — before completing the confirmation. No dialog opens
+/// when none is required (the common private `/24` case confirms
+/// directly, §3.2's "one Enter").
+fn begin_confirm(state: &mut AppState, clock: &dyn Clock) -> Vec<Effect> {
     let now = clock.now();
     let unavailable = |state: &mut AppState, reason: String| {
         state.dirty |= state
@@ -303,6 +426,184 @@ fn confirm_scope(state: &mut AppState, clock: &dyn Clock) -> Vec<Effect> {
     };
     // The confirmable case: an eligible entry always carries an IPv4
     // address (FR-SC-03), so this extraction cannot fail.
+    let Some((own_ip, _prefix)) = entry.ipv4 else {
+        return Vec::new();
+    };
+
+    // The dialog chain (task T-302 §5.4). Only an active-confirmable
+    // selection can meet any dialog: a read-only confirmation (the
+    // session is read-only, no MAC, or a `/32`) probes nothing, so
+    // neither the cap nor the public-range rule applies.
+    let active = active_confirmable(state, &entry);
+    if active {
+        let targets = probe_target_count(&scope, own_ip);
+        let cap = state.max_hosts;
+        if targets > u64::from(cap) {
+            // FR-SC-06's refusal: honest explanation, read-only
+            // remains ([Enter] continues read-only, [Esc] cancels).
+            state.confirm = Some(ConfirmOverlay {
+                kind: ConfirmKind::LargeScopeRefusal { targets, cap },
+                typed: String::new(),
+            });
+            state.dirty = true;
+            return Vec::new();
+        }
+        if targets > u64::from(DEFAULT_MAX_HOSTS) {
+            // FR-SC-06's raised-cap confirmation: the packet count and
+            // the estimated duration before proceeding.
+            state.confirm = Some(ConfirmOverlay {
+                kind: ConfirmKind::LargeScope {
+                    targets,
+                    requests: initial_request_count(targets),
+                    estimated: estimate_duration(
+                        targets,
+                        Trigger::Initial.passes(),
+                        DEFAULT_RATE_PPS,
+                        DEFAULT_LISTEN_WINDOW,
+                    ),
+                },
+                typed: String::new(),
+            });
+            state.dirty = true;
+            return Vec::new();
+        }
+        if !is_local_use_network(&scope) {
+            // FR-SC-07: a public range needs the typed `yes` (active
+            // mode only — the `active` guard above).
+            state.confirm = Some(ConfirmOverlay {
+                kind: ConfirmKind::PublicRange { network: scope },
+                typed: String::new(),
+            });
+            state.dirty = true;
+            return Vec::new();
+        }
+    }
+    complete_confirm(state, clock, active)
+}
+
+/// The open dialog's key handling (E-2b). The dialogs are modal:
+/// `Esc` cancels back to the list; the Enter-style dialogs accept with
+/// `Enter`; the typed-`yes` dialog accumulates letters (`q`/`Ctrl+C`
+/// do not quit — §10.3's exception, handled in [`handle_key`]).
+fn confirm_dialog_key(state: &mut AppState, key: Key, clock: &dyn Clock) -> Vec<Effect> {
+    let Some(overlay) = state.confirm.as_ref() else {
+        return Vec::new(); // unreachable through scope_key's guard
+    };
+    match &overlay.kind {
+        ConfirmKind::PublicRange { .. } => match key {
+            Key::Esc => {
+                state.confirm = None;
+                state.dirty = true;
+                Vec::new()
+            }
+            Key::Enter => {
+                let accepted = overlay.typed == "yes";
+                if accepted {
+                    // Submission proceeds; the overlay closes and the
+                    // confirmation completes (the entry is re-read —
+                    // nothing could have changed it under the modal).
+                    state.confirm = None;
+                    complete_confirm(state, clock, true)
+                } else {
+                    // A wrong answer clears the buffer; the dialog
+                    // stays open (honest, non-destructive).
+                    if let Some(overlay) = state.confirm.as_mut() {
+                        overlay.typed.clear();
+                    }
+                    state.dirty = true;
+                    Vec::new()
+                }
+            }
+            Key::Char(letter) => {
+                // Letters accumulate, bounded (`yes` is three letters;
+                // a longer buffer can never match it, and the bound
+                // keeps a hostile key flood from growing the string).
+                if let Some(overlay) = state.confirm.as_mut()
+                    && overlay.typed.len() < 16
+                    && letter.is_ascii_alphanumeric()
+                {
+                    overlay.typed.push(letter);
+                    state.dirty = true;
+                }
+                Vec::new()
+            }
+            // Arrows and the rest are ignored in the typing context
+            // (`CtrlC` included — the §10.3 exception).
+            _ => Vec::new(),
+        },
+        ConfirmKind::LargeScopeRefusal { .. } => match key {
+            Key::Esc => {
+                state.confirm = None;
+                state.dirty = true;
+                Vec::new()
+            }
+            // Continue read-only: the read-only confirmation (the
+            // refusal's honest alternative — active stays refused).
+            Key::Enter => {
+                state.confirm = None;
+                complete_confirm(state, clock, false)
+            }
+            _ => Vec::new(),
+        },
+        ConfirmKind::LargeScope { .. } => match key {
+            Key::Esc => {
+                state.confirm = None;
+                state.dirty = true;
+                Vec::new()
+            }
+            // Proceed actively; a public network still chains its
+            // typed-`yes` before the confirmation completes.
+            Key::Enter => {
+                let scope = state
+                    .interfaces
+                    .get(state.scope_selected)
+                    .and_then(super::state::ScopeEntry::derive_scope);
+                state.confirm = None;
+                if let Some(scope) = scope
+                    && !is_local_use_network(&scope)
+                {
+                    state.confirm = Some(ConfirmOverlay {
+                        kind: ConfirmKind::PublicRange { network: scope },
+                        typed: String::new(),
+                    });
+                    state.dirty = true;
+                    return Vec::new();
+                }
+                complete_confirm(state, clock, true)
+            }
+            _ => Vec::new(),
+        },
+    }
+}
+
+/// Completes the confirmation (the T-205 `confirm_scope` body plus the
+/// T-302 facts): records the scope facts with the
+/// [`discovery_active`](super::state::ConfirmedScope::discovery_active)
+/// attach decision, inserts the interface's own device, arms
+/// discovery and opens the Dashboard.
+fn complete_confirm(state: &mut AppState, clock: &dyn Clock, active: bool) -> Vec<Effect> {
+    let now = clock.now();
+    let unavailable = |state: &mut AppState, reason: String| {
+        state.dirty |= state
+            .messages
+            .append(MessageKind::ScopeUnavailable { reason }, now);
+    };
+    let Some(entry) = state.interfaces.get(state.scope_selected).cloned() else {
+        unavailable(state, IneligibleReason::NoIpv4Address.to_string());
+        return Vec::new();
+    };
+    if !entry.is_eligible() {
+        let reason = match entry.eligibility {
+            crate::net::Eligibility::Ineligible(reason) => reason.to_string(),
+            crate::net::Eligibility::Eligible => String::new(), // unreachable here
+        };
+        unavailable(state, reason);
+        return Vec::new();
+    }
+    let Some(scope) = entry.derive_scope() else {
+        unavailable(state, IneligibleReason::NoIpv4Address.to_string());
+        return Vec::new();
+    };
     let Some((own_ip, _prefix)) = entry.ipv4 else {
         return Vec::new();
     };
@@ -337,6 +638,10 @@ fn confirm_scope(state: &mut AppState, clock: &dyn Clock) -> Vec<Effect> {
         iface_mac: entry.mac,
         own_ip,
         gateway_ip: entry.default_gateway,
+        // The PQ-3 attach decision (E-2d): whether the startup
+        // assembly selects an active worker for the confirmed
+        // interface or binds it read-only.
+        discovery_active: active,
     });
     state.discovery_armed = true;
     state.screen = Screen::Dashboard;
@@ -711,6 +1016,7 @@ mod tests {
     use crate::model::testing::Lcg;
     use crate::net::Eligibility;
     use crate::net::InterfaceClass;
+    use crate::net::LinkType;
     use crate::registry::Tag;
     use std::net::Ipv4Addr;
     use std::sync::Arc;
@@ -736,6 +1042,7 @@ mod tests {
             is_up: true,
             is_running: true,
             is_loopback: false,
+            link_type: LinkType::Ethernet,
             class: InterfaceClass::Physical,
             eligibility: Eligibility::Eligible,
             default_gateway: gateway,
@@ -752,6 +1059,7 @@ mod tests {
             is_up: true,
             is_running: true,
             is_loopback: false,
+            link_type: LinkType::Ethernet,
             class: InterfaceClass::Physical,
             eligibility: Eligibility::Eligible,
             default_gateway: None,
@@ -767,6 +1075,7 @@ mod tests {
             is_up: true,
             is_running: true,
             is_loopback: true,
+            link_type: LinkType::Loopback,
             class: InterfaceClass::Virtual,
             eligibility: Eligibility::Ineligible(IneligibleReason::Loopback),
             default_gateway: None,
@@ -778,8 +1087,22 @@ mod tests {
         update(state, AppEvent::Input(InputEvent::Key(key)), clock)
     }
 
+    /// Drives the full scope confirmation for a selection that meets
+    /// the FR-SC-07 typed-`yes` dialog (the synthetic fixtures use the
+    /// RFC 5737 documentation range — a public network, so the dialog
+    /// is mandatory): `Enter`, the letters `yes`, `Enter`.
+    fn confirm_with_typed_yes(state: &mut AppState, clock: &dyn Clock) -> Vec<Effect> {
+        let opened = key(state, Key::Enter, clock);
+        assert!(opened.is_empty(), "the dialog opens without effects");
+        for letter in ['y', 'e', 's'] {
+            key(state, Key::Char(letter), clock);
+        }
+        key(state, Key::Enter, clock)
+    }
+
     /// A fresh state over the entries, past the notice and the scope
-    /// confirmation (the realistic path: `y` then `Enter`).
+    /// confirmation (the realistic path: `y` then the FR-SC-07 typed
+    /// confirmation).
     fn confirmed(entries: Vec<ScopeEntry>) -> (AppState, FakeClock) {
         confirmed_with(SessionParams::default(), entries)
     }
@@ -793,7 +1116,7 @@ mod tests {
             key(&mut state, Key::Char('y'), &clock);
         }
         assert_eq!(state.screen(), Screen::Scope);
-        key(&mut state, Key::Enter, &clock);
+        confirm_with_typed_yes(&mut state, &clock);
         assert_eq!(state.screen(), Screen::Dashboard);
         (state, clock)
     }
@@ -951,7 +1274,7 @@ mod tests {
         )
         .expect("valid");
         key(&mut state, Key::Char('y'), &clock);
-        let effects = key(&mut state, Key::Enter, &clock);
+        let effects = confirm_with_typed_yes(&mut state, &clock);
         // Hostnames enabled ⇒ exactly the own-address lookup.
         assert_eq!(
             effects,
@@ -973,7 +1296,7 @@ mod tests {
         let mut state = AppState::with_scope_entries(params, vec![eth_entry(None)], db(), &clock)
             .expect("valid");
         key(&mut state, Key::Char('y'), &clock);
-        let effects = key(&mut state, Key::Enter, &clock);
+        let effects = confirm_with_typed_yes(&mut state, &clock);
         assert!(effects.is_empty());
         assert!(state.discovery_armed());
     }
@@ -2430,5 +2753,410 @@ mod tests {
             crate::registry::Status::Recent,
             "Failed cycles never age (ADR-007)"
         );
+    }
+
+    // ---- task T-302: the FR-SC-05/06/07/08 formulas and dialogs ----------
+
+    /// An entry with an explicit address/prefix (the formula fixtures).
+    fn net_entry(name: &str, address: Ipv4Addr, prefix: u8) -> ScopeEntry {
+        ScopeEntry {
+            name: name.to_owned(),
+            index: 7,
+            mac: Some("aa:bb:cc:dd:ee:07".parse().expect("valid MAC")),
+            ipv4: Some((address, prefix)),
+            is_up: true,
+            is_running: true,
+            is_loopback: false,
+            link_type: crate::net::LinkType::Ethernet,
+            class: InterfaceClass::Physical,
+            eligibility: Eligibility::Eligible,
+            default_gateway: None,
+        }
+    }
+
+    #[test]
+    fn probe_target_counts_mirror_the_scanner_for_every_prefix_class() {
+        // FR-SC-05, card-fixed: usable hosts minus network/broadcast/
+        // own; /31 both; /32 zero. The values match the scanner's own
+        // target generation (targets() in the arp scanner).
+        let cases: &[(u8, u64)] = &[
+            (24, 253),  // 254 usable - own
+            (29, 5),    // 6 usable - own
+            (30, 1),    // 2 usable - own
+            (31, 1),    // both addresses - own
+            (32, 0),    // nothing to probe
+            (22, 1021), // the default cap boundary
+            (21, 2045), // above the default cap
+            (16, 65533),
+        ];
+        for &(prefix, expected) in cases {
+            let scope =
+                crate::model::Ipv4Net::new(Ipv4Addr::new(10, 0, 0, 1), prefix).expect("valid");
+            assert_eq!(
+                probe_target_count(&scope, Ipv4Addr::new(10, 0, 0, 1)),
+                expected,
+                "/{prefix}"
+            );
+        }
+        // An own address outside the host range subtracts nothing (the
+        // defensive arm; cannot happen for a real interface).
+        let scope = crate::model::Ipv4Net::new(Ipv4Addr::new(10, 0, 0, 0), 24).expect("valid");
+        assert_eq!(probe_target_count(&scope, Ipv4Addr::new(192, 0, 2, 9)), 254);
+    }
+
+    #[test]
+    fn the_request_count_and_duration_formulas_are_the_card_fixed_ones() {
+        // FR-SC-08: requests = targets × passes (initial: 2).
+        assert_eq!(initial_request_count(253), 506);
+        assert_eq!(initial_request_count(0), 0);
+        assert_eq!(initial_request_count(1), 2);
+        // The card-fixed duration: passes × (ceil(targets / rate) +
+        // listen_window). 253 targets at 100 pps, 2 passes, 1.5 s:
+        // 2 × (3 + 1.5) = 9 s. 1 target: 2 × (1 + 1.5) = 5 s.
+        assert_eq!(
+            estimate_duration(253, 2, DEFAULT_RATE_PPS, DEFAULT_LISTEN_WINDOW),
+            Duration::from_secs(9)
+        );
+        assert_eq!(
+            estimate_duration(1, 2, DEFAULT_RATE_PPS, DEFAULT_LISTEN_WINDOW),
+            Duration::from_secs(5)
+        );
+        // The rounding is ceiling: 101 targets need two seconds of
+        // sending at 100 pps.
+        assert_eq!(
+            estimate_duration(101, 1, DEFAULT_RATE_PPS, DEFAULT_LISTEN_WINDOW),
+            Duration::from_millis(3500)
+        );
+    }
+
+    #[test]
+    fn local_use_classification_follows_fr_sc07() {
+        // Private (RFC 1918), link-local and CGNAT need no dialog.
+        for (address, prefix) in [
+            (Ipv4Addr::new(10, 0, 0, 0), 24),
+            (Ipv4Addr::new(172, 16, 0, 0), 12),
+            (Ipv4Addr::new(192, 168, 1, 0), 24),
+            (Ipv4Addr::new(169, 254, 0, 0), 16),
+            (Ipv4Addr::new(100, 64, 0, 0), 10),
+        ] {
+            let scope = crate::model::Ipv4Net::new(address, prefix).expect("valid");
+            assert!(is_local_use_network(&scope), "{address}/{prefix}");
+        }
+        // Documentation and benchmark ranges are public here (the
+        // synthetic fixtures themselves): typed-`yes` territory.
+        for (address, prefix) in [
+            (Ipv4Addr::new(192, 0, 2, 0), 24),
+            (Ipv4Addr::new(198, 51, 100, 0), 24),
+            (Ipv4Addr::new(203, 0, 113, 0), 24),
+            (Ipv4Addr::new(198, 18, 0, 0), 15),
+            (Ipv4Addr::new(8, 8, 8, 0), 24),
+        ] {
+            let scope = crate::model::Ipv4Net::new(address, prefix).expect("valid");
+            assert!(!is_local_use_network(&scope), "{address}/{prefix}");
+        }
+    }
+
+    #[test]
+    fn a_private_network_confirms_with_one_enter_no_dialog() {
+        // The common case (§3.2's "one Enter"): no dialog on a private
+        // /24 in an active session.
+        let entry = net_entry("eth9", Ipv4Addr::new(192, 168, 1, 20), 24);
+        let clock = FakeClock::new();
+        let mut state =
+            AppState::with_scope_entries(SessionParams::default(), vec![entry], db(), &clock)
+                .expect("valid");
+        key(&mut state, Key::Char('y'), &clock);
+        let effects = key(&mut state, Key::Enter, &clock);
+        assert_eq!(
+            effects,
+            vec![Effect::ResolveHostname {
+                ip: Ipv4Addr::new(192, 168, 1, 20)
+            }]
+        );
+        assert!(state.confirm_kind().is_none(), "no dialog opens");
+        assert!(state.discovery_armed());
+        let confirmed = state.confirmed_scope().expect("confirmed");
+        assert!(confirmed.discovery_active);
+        assert_eq!(confirmed.iface_name, "eth9");
+    }
+
+    #[test]
+    fn the_default_cap_refuses_active_discovery_and_read_only_remains() {
+        // FR-SC-06: a /21 (2,045 targets) at the default cap — the
+        // refusal dialog opens; Esc cancels; Enter continues
+        // read-only, and the confirmed scope records the read-only
+        // attach decision (the local device still inserts, the own
+        // hostname still queues — neither is a probe).
+        let entry = net_entry("big0", Ipv4Addr::new(10, 0, 0, 1), 21);
+        let clock = FakeClock::new();
+        let mut state =
+            AppState::with_scope_entries(SessionParams::default(), vec![entry], db(), &clock)
+                .expect("valid");
+        key(&mut state, Key::Char('y'), &clock);
+        let effects = key(&mut state, Key::Enter, &clock);
+        assert!(effects.is_empty());
+        match state.confirm_kind() {
+            Some(ConfirmKind::LargeScopeRefusal { targets, cap }) => {
+                assert_eq!(*targets, 2045);
+                assert_eq!(*cap, crate::model::ipv4::DEFAULT_MAX_HOSTS);
+            }
+            other => panic!("the refusal dialog did not open: {other:?}"),
+        }
+        // Esc cancels; nothing is armed.
+        key(&mut state, Key::Esc, &clock);
+        assert!(state.confirm_kind().is_none());
+        assert!(!state.discovery_armed());
+        // Re-open and continue read-only.
+        key(&mut state, Key::Enter, &clock);
+        let effects = key(&mut state, Key::Enter, &clock);
+        assert_eq!(
+            effects,
+            vec![Effect::ResolveHostname {
+                ip: Ipv4Addr::new(10, 0, 0, 1)
+            }]
+        );
+        assert!(state.confirm_kind().is_none());
+        assert!(state.discovery_armed());
+        assert!(
+            !state.confirmed_scope().expect("confirmed").discovery_active,
+            "the refusal's continuation is read-only"
+        );
+    }
+
+    #[test]
+    fn the_raised_cap_confirms_with_the_packet_count_dialog() {
+        // FR-SC-06 raised: max_hosts 4,094, a /21 fits — the
+        // Enter-style dialog shows the request count and the estimate;
+        // Enter proceeds actively (the network here is private, so no
+        // typed-yes chains).
+        let entry = net_entry("big0", Ipv4Addr::new(10, 0, 0, 1), 21);
+        let params = SessionParams {
+            max_hosts: 4_094,
+            ..SessionParams::default()
+        };
+        let clock = FakeClock::new();
+        let mut state =
+            AppState::with_scope_entries(params, vec![entry], db(), &clock).expect("valid");
+        key(&mut state, Key::Char('y'), &clock);
+        let effects = key(&mut state, Key::Enter, &clock);
+        assert!(effects.is_empty());
+        match state.confirm_kind() {
+            Some(ConfirmKind::LargeScope {
+                targets,
+                requests,
+                estimated,
+            }) => {
+                assert_eq!(*targets, 2045);
+                assert_eq!(*requests, 4090);
+                assert_eq!(*estimated, Duration::from_secs(45)); // 2×(21+1.5)
+            }
+            other => panic!("the raised-cap dialog did not open: {other:?}"),
+        }
+        // Esc cancels, then the full path: dialog, Enter, confirm.
+        key(&mut state, Key::Esc, &clock);
+        key(&mut state, Key::Enter, &clock);
+        key(&mut state, Key::Enter, &clock);
+        assert!(state.discovery_armed());
+        assert!(state.confirmed_scope().expect("confirmed").discovery_active);
+    }
+
+    #[test]
+    fn above_the_raised_cap_is_refused_with_the_actual_cap() {
+        // A /19 (8,189 targets) over a raised cap of 4,094: refused
+        // with the raised cap stated (the honest wording).
+        let entry = net_entry("huge0", Ipv4Addr::new(10, 0, 0, 1), 19);
+        let params = SessionParams {
+            max_hosts: 4_094,
+            ..SessionParams::default()
+        };
+        let clock = FakeClock::new();
+        let mut state =
+            AppState::with_scope_entries(params, vec![entry], db(), &clock).expect("valid");
+        key(&mut state, Key::Char('y'), &clock);
+        key(&mut state, Key::Enter, &clock);
+        match state.confirm_kind() {
+            Some(ConfirmKind::LargeScopeRefusal { targets, cap }) => {
+                assert_eq!(*targets, 8189);
+                assert_eq!(*cap, 4_094);
+            }
+            other => panic!("expected the refusal at the raised cap: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_typed_yes_state_machine_accepts_only_the_exact_word() {
+        // FR-SC-07 (E-2b): letters accumulate; Enter submits (only the
+        // exact "yes" proceeds); Esc cancels; q/Ctrl+C do not quit
+        // while typing (§10.3's exception).
+        let entry = net_entry("pub0", Ipv4Addr::new(203, 0, 113, 1), 24);
+        let clock = FakeClock::new();
+        let mut state =
+            AppState::with_scope_entries(SessionParams::default(), vec![entry], db(), &clock)
+                .expect("valid");
+        key(&mut state, Key::Char('y'), &clock);
+        key(&mut state, Key::Enter, &clock);
+        assert!(matches!(
+            state.confirm_kind(),
+            Some(ConfirmKind::PublicRange { .. })
+        ));
+        // Letters accumulate, visibly.
+        key(&mut state, Key::Char('y'), &clock);
+        assert_eq!(state.confirm_typed(), "y");
+        key(&mut state, Key::Char('e'), &clock);
+        key(&mut state, Key::Char('s'), &clock);
+        assert_eq!(state.confirm_typed(), "yes");
+        // Arrows are ignored in the typing context (no navigation
+        // away from a modal).
+        key(&mut state, Key::Up, &clock);
+        assert_eq!(state.confirm_typed(), "yes");
+        // q while typing: NOT a quit (§10.3's exception) — it is a
+        // letter of the typing context.
+        let effects = key(&mut state, Key::Char('q'), &clock);
+        assert!(effects.is_empty());
+        assert!(!state.quit());
+        assert_eq!(state.confirm_typed(), "yesq");
+        // Ctrl+C while typing: not a quit either.
+        let effects = key(&mut state, Key::CtrlC, &clock);
+        assert!(effects.is_empty());
+        assert!(!state.quit());
+        // The wrong text does not submit: Enter clears, stays open.
+        key(&mut state, Key::Enter, &clock);
+        assert!(matches!(
+            state.confirm_kind(),
+            Some(ConfirmKind::PublicRange { .. })
+        ));
+        assert_eq!(state.confirm_typed(), "");
+        assert!(!state.discovery_armed());
+        // The exact word submits: armed, active, no dialog.
+        for letter in ['y', 'e', 's'] {
+            key(&mut state, Key::Char(letter), &clock);
+        }
+        let effects = key(&mut state, Key::Enter, &clock);
+        assert_eq!(
+            effects,
+            vec![Effect::ResolveHostname {
+                ip: Ipv4Addr::new(203, 0, 113, 1)
+            }]
+        );
+        assert!(state.confirm_kind().is_none());
+        assert!(state.discovery_armed());
+        assert!(state.confirmed_scope().expect("confirmed").discovery_active);
+    }
+
+    #[test]
+    fn esc_cancels_the_typed_yes_dialog_and_read_only_needs_none() {
+        let entry = net_entry("pub0", Ipv4Addr::new(203, 0, 113, 1), 24);
+        let clock = FakeClock::new();
+        let mut state = AppState::with_scope_entries(
+            SessionParams::default(),
+            vec![entry.clone()],
+            db(),
+            &clock,
+        )
+        .expect("valid");
+        key(&mut state, Key::Char('y'), &clock);
+        key(&mut state, Key::Enter, &clock);
+        key(&mut state, Key::Char('y'), &clock);
+        key(&mut state, Key::Esc, &clock);
+        assert!(state.confirm_kind().is_none());
+        assert!(!state.discovery_armed());
+        assert_eq!(state.screen(), Screen::Scope, "back on the list");
+        // A read-only session never sees the public-range dialog.
+        let params = SessionParams {
+            mode: crate::app::AppMode::ReadOnly {
+                reason: "no CAP_NET_RAW: read-only mode (neighbor table only)".to_owned(),
+            },
+            ..SessionParams::default()
+        };
+        let mut state =
+            AppState::with_scope_entries(params, vec![entry], db(), &clock).expect("valid");
+        key(&mut state, Key::Char('y'), &clock);
+        // One Enter, no dialog: the read-only confirmation queues only
+        // the own-hostname lookup (a DNS question, not a probe).
+        let effects = key(&mut state, Key::Enter, &clock);
+        assert_eq!(
+            effects,
+            vec![Effect::ResolveHostname {
+                ip: Ipv4Addr::new(203, 0, 113, 1)
+            }]
+        );
+        assert!(state.confirm_kind().is_none(), "read-only needs none");
+        assert!(state.discovery_armed());
+        assert!(!state.confirmed_scope().expect("confirmed").discovery_active);
+    }
+
+    #[test]
+    fn a_slash32_confirms_read_only_without_a_dialog() {
+        // FR-SC-05: a /32 has no probe targets — read-only only, no
+        // public-range dialog, no cap dialog, one Enter.
+        let entry = net_entry("tun9", Ipv4Addr::new(203, 0, 113, 1), 32);
+        let clock = FakeClock::new();
+        let mut state =
+            AppState::with_scope_entries(SessionParams::default(), vec![entry], db(), &clock)
+                .expect("valid");
+        key(&mut state, Key::Char('y'), &clock);
+        let effects = key(&mut state, Key::Enter, &clock);
+        assert_eq!(
+            effects,
+            vec![Effect::ResolveHostname {
+                ip: Ipv4Addr::new(203, 0, 113, 1)
+            }]
+        );
+        assert!(state.confirm_kind().is_none());
+        assert!(!state.confirmed_scope().expect("confirmed").discovery_active);
+    }
+
+    #[test]
+    fn a_public_raised_cap_network_chains_both_dialogs() {
+        // FR-SC-06 then FR-SC-07: a public /21 under a raised cap
+        // confirms the scope first, then asks for the typed yes.
+        let entry = net_entry("pubbig0", Ipv4Addr::new(203, 0, 113, 1), 21);
+        let params = SessionParams {
+            max_hosts: 4_094,
+            ..SessionParams::default()
+        };
+        let clock = FakeClock::new();
+        let mut state =
+            AppState::with_scope_entries(params, vec![entry], db(), &clock).expect("valid");
+        key(&mut state, Key::Char('y'), &clock);
+        key(&mut state, Key::Enter, &clock);
+        assert!(matches!(
+            state.confirm_kind(),
+            Some(ConfirmKind::LargeScope { .. })
+        ));
+        key(&mut state, Key::Enter, &clock);
+        assert!(matches!(
+            state.confirm_kind(),
+            Some(ConfirmKind::PublicRange { .. })
+        ));
+        for letter in ['y', 'e', 's'] {
+            key(&mut state, Key::Char(letter), &clock);
+        }
+        key(&mut state, Key::Enter, &clock);
+        assert!(state.discovery_armed());
+        assert!(state.confirmed_scope().expect("confirmed").discovery_active);
+    }
+
+    #[test]
+    fn the_notice_ack_effect_is_emitted_exactly_once() {
+        // E-2a: `y` emits PersistNoticeAck exactly once; a second `y`
+        // on the scope screen is not a notice acknowledgment.
+        let clock = FakeClock::new();
+        let mut state = AppState::with_scope_entries(
+            SessionParams::default(),
+            vec![eth_entry(None)],
+            db(),
+            &clock,
+        )
+        .expect("valid");
+        let effects = key(&mut state, Key::Char('y'), &clock);
+        assert_eq!(
+            effects,
+            vec![Effect::PersistNoticeAck {
+                version: crate::app::config::NOTICE_VERSION
+            }]
+        );
+        let effects = key(&mut state, Key::Char('y'), &clock);
+        assert!(effects.is_empty(), "no second emission");
     }
 }
