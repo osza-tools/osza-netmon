@@ -230,7 +230,26 @@ impl PtySession {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        contains(&self.output(), needle)
+        let found = contains(&self.output(), needle);
+        if !found {
+            // Diagnostics: the full output is preserved next to the
+            // scenario's temp files; the tail is inlined.
+            let output = self.output();
+            let debug_path = std::env::temp_dir().join(format!(
+                "osza-t302-pty-{label}-waitfull.out",
+                label = self.label
+            ));
+            let _ = std::fs::write(&debug_path, &output);
+            let tail: String = String::from_utf8_lossy(&output[output.len().saturating_sub(400)..])
+                .escape_debug()
+                .to_string();
+            panic!(
+                "wait_for({needle:?}) timed out after {timeout:?}; tail: {tail} \
+                 (full output: {})",
+                debug_path.display()
+            );
+        }
+        found
     }
 
     /// The application's pid: the wrapper shell's only foreground
