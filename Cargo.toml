@@ -71,7 +71,7 @@ caps = "=0.5.6"
 # default channel+iterator set). The §9.2 evaluation against the nix
 # signalfd alternative is in docs/adr/018-signal-handling.md; the
 # pre-authorization is task card T-301 §5.3 option (a).
-signal-hook = "=0.3.18"
+signal-hook = "=0.4.6"
 
 [dev-dependencies]
 # T-202 §8 pre-approval (plan §9.1 dev-only candidate): CSV parsing for
