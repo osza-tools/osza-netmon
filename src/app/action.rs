@@ -183,6 +183,30 @@ pub trait EffectsExecutor {
         worker.shutdown();
         Ok(())
     }
+
+    /// Swaps the hostname worker post-confirmation (task T-302-FU1,
+    /// the PQ-2 fix — the confirm-time resolver re-selection): retires
+    /// the current worker — its own stop flag interrupts its
+    /// resolver's pending socket wait (the T-203 construction
+    /// contract) and the join is bounded by the same T-203 bound the
+    /// shutdown sequence uses; leftover bounded-queue events die with
+    /// the retired worker under the T-203 drop discipline, counters
+    /// honest — and installs the wiring-built replacement (a fresh
+    /// stop flag; the resolver built by the wiring: a real
+    /// [`UdpResolver`](crate::enrichment::dns::UdpResolver) for a
+    /// swap, `None` for a drop). Called by
+    /// [`Runtime::attach_hostname`](super::runtime::Runtime::attach_hostname)
+    /// exactly once, when the confirm-time decision is Swap or Drop.
+    ///
+    /// The default implementation is the honest fallback for
+    /// executors that own no hostname worker to swap (the test
+    /// recording executor inherits it): the stray handle is shut
+    /// down, never leaked or dropped un-joined — the total mirror of
+    /// [`EffectsExecutor::attach_discovery`]'s default arm.
+    fn attach_hostname(&mut self, mut worker: HostnameWorker) -> Result<(), EffectError> {
+        worker.shutdown();
+        Ok(())
+    }
 }
 
 /// The production executor: owns the T-204 orchestrator handle and the
@@ -289,6 +313,21 @@ impl EffectsExecutor for WorkerExecutor {
             dormant.shutdown();
         }
         self.discovery = Some(worker);
+        Ok(())
+    }
+
+    fn attach_hostname(&mut self, worker: HostnameWorker) -> Result<(), EffectError> {
+        // T-302-FU1: retire the startup worker (its stop flag — the
+        // one its resolver shares, per the T-203 construction
+        // contract — interrupts any pending socket wait; the join is
+        // bounded by the T-203 bound the shutdown sequence uses) and
+        // take over the replacement (a fresh stop flag, the
+        // wiring-built resolver). The swap never panics and never
+        // blocks the loop unboundedly (R-2).
+        if let Some(mut startup) = self.hostname.take() {
+            startup.shutdown();
+        }
+        self.hostname = Some(worker);
         Ok(())
     }
 }

@@ -50,6 +50,7 @@
 //! `None` until the Scope screen's `Enter`, `Some` ever after.
 
 use std::net::Ipv4Addr;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -347,6 +348,14 @@ pub struct AppState {
     /// Whether hostname lookups are queued (§5.9; `--no-hostnames` is
     /// T-402).
     pub(crate) hostnames_enabled: bool,
+    /// The session's effective resolver (T-302-FU1's F-3 truth): set
+    /// from [`SessionParams::resolver_selected`](super::config::SessionParams::resolver_selected)
+    /// at construction, re-recorded by the runtime's hostname attach
+    /// when the confirm-time re-selection swaps or drops the worker
+    /// — `Some` only ever for a resolver inside the **confirmed**
+    /// scope (ADR-003's "selected subnet"; T-304 renders it as
+    /// "reverse DNS via `<addr>`").
+    pub(crate) resolver_selected: Option<SocketAddr>,
     /// The bounded, deduplicating message log (§5.7).
     pub(crate) messages: MessageLog,
     /// The last finished cycle (§5.4).
@@ -462,6 +471,7 @@ impl AppState {
             scheduler,
             vendor_db,
             hostnames_enabled: params.hostnames_enabled,
+            resolver_selected: params.resolver_selected,
             messages: MessageLog::new(),
             last_scan: None,
             counters: CountersSnapshot::default(),
@@ -689,6 +699,20 @@ mod tests {
         assert!(state.dirty(), "the first frame has something to draw");
         assert!(state.confirmed_scope().is_none());
         assert!(state.last_scan().is_none());
+        // T-302-FU1's F-3 mirror: the startup selection is the state's
+        // truth until the confirm-time re-selection re-records it.
+        assert_eq!(state.resolver_selected, None);
+        let with_resolver = AppState::with_scope_entries(
+            params_with_resolver(),
+            Vec::new(),
+            db(),
+            &FakeClock::new(),
+        )
+        .expect("defaults are valid");
+        assert_eq!(
+            with_resolver.resolver_selected,
+            Some("192.0.2.53:53".parse().expect("valid socket address"))
+        );
         // The plain defaults carry no resolver while hostnames are
         // enabled, so exactly the NoEligibleResolver message fires.
         let messages: Vec<_> = state.messages().collect();

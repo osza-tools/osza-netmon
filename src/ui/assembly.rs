@@ -62,6 +62,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::Ipv4Addr;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Receiver;
@@ -78,9 +79,11 @@ use crate::app::Effect;
 use crate::app::EffectError;
 use crate::app::EffectsExecutor;
 use crate::app::MAX_WAIT;
+use crate::app::ResolverScopeDecision;
 use crate::app::Runtime;
 use crate::app::SessionParams;
 use crate::app::WorkerExecutor;
+use crate::app::resolver_scope_decision;
 use crate::app::runtime::TICK_INTERVAL;
 use crate::app::{NOTICE_VERSION, WorkerStats};
 use crate::discovery::ArpScanner;
@@ -96,6 +99,7 @@ use crate::discovery::worker::CycleEvent;
 use crate::enrichment::dns::NameResolver;
 use crate::enrichment::dns::UdpResolver;
 use crate::enrichment::hostname::HostnameConfig;
+use crate::enrichment::hostname::ResolverSelection;
 use crate::enrichment::hostname::select_from_system;
 use crate::enrichment::vendor::VendorDb;
 use crate::enrichment::worker::HostnameEvent;
@@ -255,13 +259,14 @@ pub fn run(params: AssemblyParams) -> Result<(), AssemblyError> {
     //    interface's scope, and the hostname worker. The stop flag is
     //    one `Arc` shared by the worker and its resolver (a pending
     //    socket wait is interrupted on shutdown — the T-203
-    //    construction contract).
-    //
-    //    Known residual divergence (report §6): the resolver is
-    //    selected at startup over the *suggested* scope — the frozen
-    //    T-203/T-205 worker shape fixes it there; confirming a
-    //    different interface may leave the resolver outside the
-    //    confirmed subnet.
+    //    construction contract). The selection is *provisional*:
+    //    T-302-FU1 (the PQ-2 ruling, plan v1.13.0) re-runs the
+    //    selection over the **confirmed** scope at the attach — the
+    //    startup worker is kept only when its resolver lies inside
+    //    the confirmed subnet; otherwise it is swapped to an eligible
+    //    resolver for that scope or to none (hostnames honestly
+    //    `Unavailable (no local resolver)`), and no lookup executes
+    //    before the swap (the deferred-hostname gate).
     let startup_scope = suggested.and_then(derive_scope);
     let hostname_stop = Arc::new(AtomicBool::new(false));
     let (resolver, resolver_selected) = match startup_scope {
@@ -287,6 +292,13 @@ pub fn run(params: AssemblyParams) -> Result<(), AssemblyError> {
         hostname_stop,
     )
     .map_err(|error| AssemblyError::WorkerSpawn(error.to_string()))?;
+    // The T-302-FU1 decision inputs (R-5's seam, mirrored by the pty
+    // fake sessions): the startup selection plus the real system
+    // re-selection source.
+    let resolver_scope = ResolverScope {
+        startup: resolver_selected,
+        reselect: ResolverReselect::System,
+    };
 
     // 5. The dormant read-only placeholder worker (the T-301 no-
     //    eligible handle shape, now uniform): an honest idle event
@@ -311,9 +323,9 @@ pub fn run(params: AssemblyParams) -> Result<(), AssemblyError> {
         Arc::new(VendorDb::embedded().map_err(|error| AssemblyError::VendorDb(error.to_string()))?);
     let state = AppState::new(session, interfaces, vendor_db, clock.as_ref())?;
     let executor = AssembledExecutor::new(WorkerExecutor::new(dormant, hostname), ack_store);
-    let (runtime, sender) = Runtime::new_detached(state, executor, dormant_events, clock);
+    let (runtime, sender) = Runtime::new_detached(state, executor, dormant_events, clock.clone());
 
-    lifecycle(params, runtime, sender, pending)
+    lifecycle(params, runtime, sender, pending, clock, resolver_scope)
 }
 
 /// Opens one bound raw transport per **eligible** interface while
@@ -407,6 +419,34 @@ fn open_pending_discoveries(
 /// read-only spawner needs no privilege — the neighbor-table read
 /// binds late and free (§5.7.4).
 type DiscoverySpawner = Box<dyn FnOnce() -> (DiscoveryWorker, Receiver<CycleEvent>) + Send>;
+
+/// The confirm-time resolver-decision inputs (task T-302-FU1; R-5's
+/// fake-session seam, mirroring the pending map): what the wiring
+/// consults when it re-runs the resolver selection over the
+/// **confirmed** scope at the attach. The real assembly fills both
+/// from the real world — step 4's startup selection, the system
+/// resolver files — and the pty fake sessions inject pure data so the
+/// swap is deterministic.
+#[derive(Debug, Clone, Copy)]
+pub struct ResolverScope {
+    /// The startup-selected resolver address (step 4's
+    /// `resolver_selected`): the pure decision's first input.
+    pub startup: Option<SocketAddr>,
+    /// The re-selection source over the confirmed scope, consulted
+    /// only when the startup address lies outside it.
+    pub reselect: ResolverReselect,
+}
+
+/// The re-selection source for a confirmed scope.
+#[derive(Debug, Clone, Copy)]
+pub enum ResolverReselect {
+    /// The real system read (`select_from_system(confirmed_scope)` —
+    /// ADR-003 items 1–3 over the SR-10-bounded files).
+    System,
+    /// The injected fixture answer (the pty fake session's pure
+    /// data — no real file is read, so the swap is deterministic).
+    Fixed(ResolverSelection),
+}
 
 /// The per-eligible-interface pending sessions (PQ-3 §5.7.2): held
 /// unused until the scope confirmation, when the confirmed interface
@@ -589,6 +629,13 @@ impl EffectsExecutor for AssembledExecutor {
         self.workers.attach_discovery(worker)
     }
 
+    fn attach_hostname(&mut self, worker: HostnameWorker) -> Result<(), EffectError> {
+        // T-302-FU1: the hostname swap delegates to the worker pair,
+        // exactly like the discovery attach (the interceptor owns no
+        // workers of its own — only the E-2a persistence).
+        self.workers.attach_hostname(worker)
+    }
+
     fn worker_stats(&self) -> WorkerStats {
         self.workers.worker_stats()
     }
@@ -606,7 +653,8 @@ impl EffectsExecutor for AssembledExecutor {
 /// (the pty harness's fake-source variant, §6) — the same PQ-3
 /// attach machinery as the real assembly: the placeholder worker is
 /// detached and the pending map's confirmed interface attaches
-/// post-confirmation.
+/// post-confirmation, and the same T-302-FU1 resolver-scope decision
+/// inputs (`resolver`) drive the confirm-time re-selection.
 ///
 /// # Errors
 /// Any lifecycle failure (the terminal is restored before the error
@@ -618,9 +666,11 @@ pub fn run_with(
     placeholder_events: Receiver<CycleEvent>,
     pending: PendingDiscovery,
     clock: Arc<dyn Clock + Send + Sync>,
+    resolver: ResolverScope,
 ) -> Result<(), AssemblyError> {
-    let (runtime, sender) = Runtime::new_detached(state, executor, placeholder_events, clock);
-    lifecycle(params, runtime, sender, pending)
+    let (runtime, sender) =
+        Runtime::new_detached(state, executor, placeholder_events, clock.clone());
+    lifecycle(params, runtime, sender, pending, clock, resolver)
 }
 
 /// The terminal lifecycle around one runtime (module docs): threads,
@@ -631,6 +681,8 @@ fn lifecycle(
     mut runtime: Runtime<AssembledExecutor>,
     sender: AppEventSender,
     pending: PendingDiscovery,
+    clock: Arc<dyn Clock + Send + Sync>,
+    resolver: ResolverScope,
 ) -> Result<(), AssemblyError> {
     // The threads first: the signal registration closes the startup
     // window (a SIGTERM during init lands in the queue and quits the
@@ -658,7 +710,14 @@ fn lifecycle(
     fault_from_env().check()?;
 
     // The loop (§8.4; module docs).
-    let result = run_loop(&mut runtime, &sender, guard.terminal(), pending);
+    let result = run_loop(
+        &mut runtime,
+        &sender,
+        guard.terminal(),
+        pending,
+        &clock,
+        &resolver,
+    );
 
     // Teardown on every completing path (§5.6): the runtime's own
     // shutdown already ran on the quit step (idempotent here), then
@@ -732,19 +791,25 @@ pub fn loop_wait(now: Instant, next_tick: Instant) -> Duration {
 }
 
 /// The loop body (module docs for the sequence), including the PQ-3
-/// attach step (§5.7.2/3): right after a step that confirmed a scope,
-/// the confirmed interface's worker is built from the pending map and
-/// attached (E-2c) — before the next step's scheduler poll issues the
-/// first Initial scan, which therefore runs on the confirmed
-/// interface. Every other pending session closes at the same moment
-/// ("close all others"); a missing map entry (structurally impossible
-/// in the real assembly — every eligible interface has one) falls
-/// back to an honest read-only worker over the confirmed facts.
+/// attach step (§5.7.2/3) and the T-302-FU1 resolver re-selection:
+/// right after a step that confirmed a scope, the confirmed
+/// interface's worker is built from the pending map and attached
+/// (E-2c) — before the next step's scheduler poll issues the first
+/// Initial scan, which therefore runs on the confirmed interface.
+/// Every other pending session closes at the same moment ("close all
+/// others"); then the resolver-scope decision runs over the
+/// **confirmed** scope and is applied through the runtime's hostname
+/// attach (the deferred own-address lookup released to the post-swap
+/// executor); a missing map entry (structurally impossible in the
+/// real assembly — every eligible interface has one) falls back to
+/// an honest read-only worker over the confirmed facts.
 fn run_loop(
     runtime: &mut Runtime<AssembledExecutor>,
     sender: &AppEventSender,
     terminal: &mut ratatui::DefaultTerminal,
     mut pending: PendingDiscovery,
+    clock: &Arc<dyn Clock + Send + Sync>,
+    resolver: &ResolverScope,
 ) -> Result<(), AssemblyError> {
     let mut next_tick = Instant::now() + TICK_INTERVAL;
     let mut attached = false;
@@ -754,6 +819,10 @@ fn run_loop(
         // The PQ-3 attach (E-2c): once, on the first step that leaves
         // a confirmed scope behind.
         if !attached && let Some(confirmed) = runtime.state().confirmed_scope() {
+            // The scope fact is copied out (it is `Copy`) so the
+            // immutable borrow of the state ends before the attach's
+            // mutable borrows begin.
+            let confirmed_scope = confirmed.scope;
             let (worker, events) = pending
                 .build(&confirmed.iface_name, confirmed.discovery_active)
                 .unwrap_or_else(|| {
@@ -762,13 +831,19 @@ fn run_loop(
                     // privilege — §5.7.4).
                     DiscoveryWorker::spawn_read_only(
                         Box::new(ProcNeighborTable::new()),
-                        confirmed.scope,
+                        confirmed_scope,
                         confirmed.iface_name.clone(),
                     )
                 });
             runtime
                 .attach_discovery(worker, events)
                 .map_err(|error| AssemblyError::WorkerAttach(error.to_string()))?;
+            // T-302-FU1 (the PQ-2 fix): the confirm-time resolver
+            // re-selection over the confirmed scope, at the same loop
+            // point — the decision runs on every confirmation path
+            // (active, read-only, the no-eligible fallback) because
+            // the hostname worker exists on all of them (R-4).
+            attach_resolver_scope(runtime, resolver, confirmed_scope, clock)?;
             attached = true;
             pending.close_rest();
         }
@@ -791,6 +866,101 @@ fn run_loop(
             render::draw(terminal, runtime.state())?;
         }
     }
+}
+
+/// The T-302-FU1 attach: computes the confirm-time resolver-scope
+/// decision over the **confirmed** scope and applies it through the
+/// runtime's hostname attach. R-1: the decision itself is pure
+/// (`crate::app::resolver_scope_decision`, no I/O in it at all) —
+/// the only I/O lives here in the wiring, exactly as at startup: the
+/// system re-selection read (only when the startup resolver lies
+/// outside the confirmed scope — the common suggested-confirmed path
+/// re-reads nothing) and the replacement resolver's socket.
+///
+/// The in-subnet rule is ADR-003's "selected subnet" and is the
+/// sufficient scope discipline for the connected UDP socket: a
+/// confirmed-subnet address is on-link on the confirmed interface,
+/// so the kernel's connected route for it egresses that interface
+/// (an operator's more-specific route could still pull it off —
+/// documented as a known limitation, not fixed here).
+fn attach_resolver_scope(
+    runtime: &mut Runtime<AssembledExecutor>,
+    resolver: &ResolverScope,
+    confirmed_scope: Ipv4Net,
+    clock: &Arc<dyn Clock + Send + Sync>,
+) -> Result<(), AssemblyError> {
+    let attach = |runtime: &mut Runtime<AssembledExecutor>,
+                  replacement: Option<HostnameWorker>,
+                  effective: Option<SocketAddr>| {
+        runtime
+            .attach_hostname(replacement, effective)
+            .map_err(|error| AssemblyError::WorkerAttach(error.to_string()))
+    };
+    // The pure containment check first (an IPv6 resolver address is
+    // inside no IPv4 scope): a startup resolver inside the confirmed
+    // subnet is kept and nothing is re-read — provable by the
+    // decision function's shape (no I/O in it at all).
+    let inside = matches!(
+        resolver.startup,
+        Some(address) if matches!(address.ip(), std::net::IpAddr::V4(v4) if confirmed_scope.contains(v4))
+    );
+    let reselection = if inside {
+        None
+    } else {
+        Some(match resolver.reselect {
+            ResolverReselect::System => select_from_system(confirmed_scope),
+            ResolverReselect::Fixed(fixed) => fixed,
+        })
+    };
+    match resolver_scope_decision(resolver.startup, reselection) {
+        ResolverScopeDecision::Keep => {
+            // The proven no-op: the executor is asked for no swap
+            // (the counter stays 0); the gate releases the deferred
+            // own-address lookup over the kept worker.
+            attach(runtime, None, resolver.startup)?
+        }
+        ResolverScopeDecision::Swap(address) => {
+            let (worker, effective) = spawn_hostname_worker(Some(address), clock)?;
+            attach(runtime, Some(worker), effective)?
+        }
+        ResolverScopeDecision::Drop => {
+            let (worker, _) = spawn_hostname_worker(None, clock)?;
+            attach(runtime, Some(worker), None)?
+        }
+    }
+    Ok(())
+}
+
+/// Builds one replacement hostname worker (T-302-FU1): a fresh stop
+/// flag shared by the worker and its resolver — the T-203
+/// construction contract — with a real [`UdpResolver`] for a swap,
+/// honestly `None` for a drop or when the socket cannot be bound
+/// (step 4's degradation, never a silent Some-that-never-answers).
+///
+/// # Errors
+/// The worker spawn's refusal (OOM-class), verbatim — the same
+/// fail-closed shape as step 4.
+fn spawn_hostname_worker(
+    address: Option<SocketAddr>,
+    clock: &Arc<dyn Clock + Send + Sync>,
+) -> Result<(HostnameWorker, Option<SocketAddr>), AssemblyError> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let (resolver, effective) = match address {
+        Some(address) => match UdpResolver::new(address, Arc::clone(&stop)) {
+            Ok(resolver) => (
+                Some(Box::new(resolver) as Box<dyn NameResolver>),
+                Some(address),
+            ),
+            // The resolver socket could not be bound: honestly no
+            // resolver (the state's truth degrades to `None`).
+            Err(_) => (None, None),
+        },
+        None => (None, None),
+    };
+    let worker =
+        HostnameWorker::spawn(HostnameConfig::default(), resolver, Arc::clone(clock), stop)
+            .map_err(|error| AssemblyError::WorkerSpawn(error.to_string()))?;
+    Ok((worker, effective))
 }
 
 /// The pty-test fault seam (§6's AC-2b/c need a deterministic

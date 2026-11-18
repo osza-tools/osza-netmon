@@ -33,9 +33,37 @@
 //! read at startup (the harness isolates `XDG_CONFIG_HOME` per
 //! scenario) and the E-2a effect writes through the assembled
 //! executor.
+//!
+//! # The T-302-FU1 resolver-scope seam (R-5)
+//!
+//! `OSZA_PTY_RESOLVER_SEAM` selects the injected resolver-decision
+//! inputs for the confirm-time re-selection (pure data, mirroring the
+//! pending map), and the startup worker's fake resolver **records
+//! every query it serves** — after the session ends, the served
+//! queries are written to `<XDG_CONFIG_HOME>/osza-netmon/
+//! resolver-evidence` so the scenario can assert the swap's decision
+//! through the real loop:
+//!
+//! * `drop` — startup resolver `192.0.2.6` (inside the suggested
+//!   eth9's /29), injected re-selection `NoResolver`: confirming the
+//!   non-suggested `wlan9` must **Drop** — the evidence must show
+//!   *zero* queries served by the retired resolver (the pre-fix
+//!   behavior would leak the confirm-time own-address lookup onto
+//!   it);
+//! * `keep` — the same startup resolver, injected re-selection
+//!   `NoResolver` (adversarial: a bug that re-reads on the in-scope
+//!   path would Drop and serve nothing): confirming the suggested
+//!   `eth9` must **Keep** — the evidence must show the confirm-time
+//!   own-address lookup (`192.0.2.1`) served **first** by the kept
+//!   resolver;
+//! * unset — startup `None`, injected `NoResolver`: every
+//!   confirmation keeps the worker (behaviorally the pre-FU1
+//!   session), and no evidence file is written.
 
 use std::net::Ipv4Addr;
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
@@ -50,6 +78,7 @@ use osza_netmon::discovery::NeighborSource;
 use osza_netmon::discovery::parse_arp_table;
 use osza_netmon::enrichment::dns::NameResolver;
 use osza_netmon::enrichment::dns::ResolveError;
+use osza_netmon::enrichment::hostname::ResolverSelection;
 use osza_netmon::enrichment::worker::HostnameWorker;
 use osza_netmon::model::Clock;
 use osza_netmon::model::FakeClock;
@@ -62,6 +91,8 @@ use osza_netmon::ui::ack::AckStore;
 use osza_netmon::ui::assembly::AssembledExecutor;
 use osza_netmon::ui::assembly::AssemblyParams;
 use osza_netmon::ui::assembly::PendingDiscovery;
+use osza_netmon::ui::assembly::ResolverReselect;
+use osza_netmon::ui::assembly::ResolverScope;
 use osza_netmon::ui::assembly::run_with;
 
 /// The fake neighbor table: one fixed `/proc/net/arp` image.
@@ -79,22 +110,84 @@ impl NeighborSource for FakeNeighbors {
     }
 }
 
-/// The scripted resolver (T-205's `FakeResolver`): every query
-/// answers one fixed valid name.
+/// The scripted resolver (T-205's `FakeResolver`, grown for
+/// T-302-FU1): every query is **recorded** (the swap's decision
+/// evidence) and then answered with one fixed valid name.
 struct FakeResolver {
+    queries: Arc<Mutex<Vec<Ipv4Addr>>>,
     name: &'static str,
 }
 
 impl NameResolver for FakeResolver {
     fn reverse(
         &mut self,
-        _ip: Ipv4Addr,
+        ip: Ipv4Addr,
         _timeout: Duration,
     ) -> Result<Option<Hostname>, ResolveError> {
+        self.queries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(ip);
         Ok(Some(
             Hostname::try_from(self.name).expect("a fixed valid name"),
         ))
     }
+}
+
+/// The injected resolver-decision inputs (R-5, pure data) selected by
+/// `OSZA_PTY_RESOLVER_SEAM` (module docs): the knob's value decides
+/// the startup address; the injected re-selection is `NoResolver` in
+/// every armed phase — adversarial by design, so a bug that re-reads
+/// on the in-scope (Keep) path would Drop and serve nothing. Only an
+/// armed phase writes the evidence file (`armed`).
+struct SeamInputs {
+    /// The startup-selected resolver address (the decision's first
+    /// input).
+    startup: Option<SocketAddr>,
+    /// The injected re-selection answer for a confirmed scope.
+    reselect: ResolverReselect,
+    /// Whether an evidence phase is armed (the evidence file is
+    /// written only then; the default session stays byte-identical to
+    /// the pre-FU1 shape).
+    armed: bool,
+}
+
+fn resolver_seam_from_env() -> SeamInputs {
+    let reselect = ResolverReselect::Fixed(ResolverSelection::NoResolver);
+    match std::env::var("OSZA_PTY_RESOLVER_SEAM").as_deref() {
+        // The armed phases share the realistic startup shape: a
+        // resolver inside the *suggested* eth9's 192.0.2.0/29.
+        Ok("drop") | Ok("keep") => SeamInputs {
+            startup: Some("192.0.2.6:53".parse().expect("valid socket address")),
+            reselect,
+            armed: true,
+        },
+        // The default stays the pre-FU1 shape: no startup resolver,
+        // every confirmation keeps the worker.
+        _ => SeamInputs {
+            startup: None,
+            reselect,
+            armed: false,
+        },
+    }
+}
+
+/// Writes the served-query evidence (one `query=<ip>` line per
+/// served query, in order) under the isolated config directory, for
+/// the scenario's assertions. Best effort: no honest location or a
+/// failed write leaves no file, and the session's exit code stays
+/// the run's own (the evidence is a test artifact, not app state).
+fn write_resolver_evidence(queries: &[Ipv4Addr]) {
+    let Ok(config) = std::env::var("XDG_CONFIG_HOME") else {
+        return;
+    };
+    let dir = std::path::Path::new(&config).join("osza-netmon");
+    let _ = std::fs::create_dir_all(&dir);
+    let mut content = String::new();
+    for ip in queries {
+        content.push_str(&format!("query={ip}\n"));
+    }
+    let _ = std::fs::write(dir.join("resolver-evidence"), content);
 }
 
 /// One synthetic interface of the fake session.
@@ -201,10 +294,13 @@ pub fn run_fake_session() -> Result<(), osza_netmon::ui::assembly::AssemblyError
         String::new(),
     );
 
-    // The real hostname worker over the fake resolver.
+    // The real hostname worker over the recording fake resolver (the
+    // T-302-FU1 evidence seam: every served query is recorded).
+    let served_queries = Arc::new(Mutex::new(Vec::new()));
     let hostname = HostnameWorker::spawn(
         Default::default(),
         Some(Box::new(FakeResolver {
+            queries: Arc::clone(&served_queries),
             name: "host-five.lan",
         })),
         Arc::clone(&clock),
@@ -212,13 +308,22 @@ pub fn run_fake_session() -> Result<(), osza_netmon::ui::assembly::AssemblyError
     )
     .expect("spawn succeeds");
 
+    // The T-302-FU1 resolver-scope seam (R-5): the injected decision
+    // inputs (pure data) and the state's startup truth.
+    let seam = resolver_seam_from_env();
+    let resolver_scope = ResolverScope {
+        startup: seam.startup,
+        reselect: seam.reselect,
+    };
+
     // The state: read-only mode, the notice per the stored ack, the
-    // two-entry scope list.
+    // two-entry scope list, and the startup resolver selection.
     let params = SessionParams {
         mode: AppMode::ReadOnly {
             reason: "fake-source session (no raw socket)".to_owned(),
         },
         notice_acknowledged,
+        resolver_selected: seam.startup,
         ..SessionParams::default()
     };
     let vendor_db = Arc::new(
@@ -228,12 +333,25 @@ pub fn run_fake_session() -> Result<(), osza_netmon::ui::assembly::AssemblyError
         .expect("defaults are valid");
 
     let executor = AssembledExecutor::new(WorkerExecutor::new(dormant, hostname), ack_store);
-    run_with(
+    let result = run_with(
         AssemblyParams::default(),
         state,
         executor,
         placeholder_events,
         pending,
         clock,
-    )
+        resolver_scope,
+    );
+    // The evidence is written after the terminal is restored (the
+    // session has ended) and only for an armed phase: the
+    // served-query record under the isolated config directory, for
+    // the scenario's assertions.
+    if seam.armed {
+        write_resolver_evidence(
+            &served_queries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+    }
+    result
 }

@@ -121,6 +121,7 @@ use crate::discovery::worker::CycleMode;
 use crate::discovery::worker::CycleSummary;
 use crate::discovery::worker::Degradation;
 use crate::discovery::{DEFAULT_LISTEN_WINDOW, DEFAULT_RATE_PPS};
+use crate::enrichment::hostname::ResolverSelection;
 use crate::enrichment::vendor::VendorLookup;
 use crate::enrichment::worker::HostnameEvent;
 use crate::model::Clock;
@@ -150,6 +151,8 @@ use super::state::ConfirmedScope;
 use super::state::LastScan;
 use super::state::Screen;
 
+use std::net::SocketAddr;
+
 /// The binding T-204 §11.1 wiring recipe: the pass count comes from
 /// the trigger (ADR-011), the rate and listen window from the policy
 /// constants the scheduler re-exports. Used by `update`'s manual
@@ -160,6 +163,85 @@ pub(crate) fn scan_params_for(trigger: Trigger) -> ScanParams {
         passes: trigger.passes(),
         rate_pps: DEFAULT_RATE_PPS,
         listen_window: DEFAULT_LISTEN_WINDOW,
+    }
+}
+
+/// What the wiring does with the session's hostname worker once a
+/// scope is confirmed (task T-302-FU1 — the PQ-2 ruling of plan
+/// v1.13.0: every post-confirmation PTR query must go to a resolver
+/// **inside the confirmed subnet**, ADR-003's "selected subnet", or
+/// to no resolver at all).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolverScopeDecision {
+    /// The startup resolver lies inside the confirmed scope (or no
+    /// resolver existed and the re-selection found none): the
+    /// session's hostname worker stays exactly as it is — the proven
+    /// no-op of the common suggested-confirmed path.
+    Keep,
+    /// Replace the hostname worker with one whose resolver is this
+    /// address (an eligible resolver for the confirmed scope).
+    Swap(
+        /// The re-selected resolver (inside the confirmed subnet).
+        SocketAddr,
+    ),
+    /// Replace the hostname worker with a `None`-resolver one: no
+    /// query is ever sent, and hostnames honestly read
+    /// `Unavailable (no local resolver)` (ADR-003 item 3).
+    Drop,
+}
+
+/// Decides the hostname worker's fate at the scope confirmation
+/// (task T-302-FU1 §3's semantics, table-tested):
+///
+/// * `startup = Some(_)` with `reselection = None` — the wiring's pure
+///   containment check found the startup resolver inside the
+///   confirmed scope, so it re-read nothing: **Keep** (no swap, no
+///   re-selection; the common suggested-confirmed path is a proven
+///   no-op);
+/// * any startup with `reselection = Some(Selected { .. })` —
+///   **Swap** to the re-selected, in-scope resolver (including the
+///   `startup = None` + re-select-`Some` row: the `None`-resolver
+///   startup worker is upgraded to a real one);
+/// * `startup = Some(_)` with `reselection = Some(NoResolver)` — the
+///   confirmed scope has no eligible resolver: **Drop** (a
+///   `None`-resolver replacement; hostnames honestly
+///   `Unavailable (no local resolver)`);
+/// * `startup = None` with `reselection = Some(NoResolver)` — no
+///   resolver before, none now: **Keep** (stay `None` — a no-op, not
+///   an error).
+///
+/// The degenerate `(None, None)` row — no startup resolver and no
+/// re-selection performed — is unreachable from the wiring (a `None`
+/// startup address is inside no scope, so the wiring always
+/// re-reads) and stays total anyway: **Keep**.
+///
+/// The decision is pure: its only inputs are the two values below and
+/// there is no I/O in it at all — which is what makes the Keep row's
+/// "no `select_from_system` call" provable by the function's shape
+/// (AC-2): the re-selection result is an *input*, and the in-scope
+/// caller never produces one.
+pub fn resolver_scope_decision(
+    startup: Option<SocketAddr>,
+    reselection: Option<ResolverSelection>,
+) -> ResolverScopeDecision {
+    match reselection {
+        // No re-selection was performed: the startup resolver (when
+        // one exists) lies inside the confirmed scope — the wiring's
+        // pure containment check said so before any file was read.
+        None => ResolverScopeDecision::Keep,
+        Some(selection) => match selection.resolver_socket() {
+            // A re-selected, in-scope resolver for the confirmed
+            // scope (port 53 per `resolver_socket`).
+            Some(address) => ResolverScopeDecision::Swap(address),
+            None => match startup {
+                // A resolver existed for the suggested scope but the
+                // confirmed scope has none: honestly none.
+                Some(_) => ResolverScopeDecision::Drop,
+                // No resolver before and none now: a no-op, not an
+                // error (the worker already answers Unavailable).
+                None => ResolverScopeDecision::Keep,
+            },
+        },
     }
 }
 
@@ -1028,6 +1110,91 @@ mod tests {
         Arc::new(
             crate::enrichment::vendor::VendorDb::embedded().expect("committed database is valid"),
         )
+    }
+
+    // ---- T-302-FU1: the pure resolver-scope decision table (AC-2) ------------
+
+    #[test]
+    fn fu1_the_resolver_scope_decision_table_is_exactly_the_cards_semantics() {
+        // Every row of §3's semantics. The addresses are RFC 5737/
+        // documentation-range fixtures; the swap target carries the
+        // resolver port 53 exactly as `resolver_socket()` builds it.
+        let startup = "192.0.2.6:53".parse::<SocketAddr>().expect("valid");
+        let reselected = "203.0.113.7:53".parse::<SocketAddr>().expect("valid");
+        let selected = ResolverSelection::Selected {
+            address: Ipv4Addr::new(203, 0, 113, 7),
+            via_systemd_fallback: false,
+        };
+        // startup Some + no re-selection (the wiring's containment
+        // check passed) → Keep — the common suggested-confirmed path
+        // is a proven no-op.
+        assert_eq!(
+            resolver_scope_decision(Some(startup), None),
+            ResolverScopeDecision::Keep
+        );
+        // startup Some + re-select Some → Swap to the re-selected
+        // resolver (inside the confirmed scope by the selection's
+        // own rule).
+        assert_eq!(
+            resolver_scope_decision(Some(startup), Some(selected)),
+            ResolverScopeDecision::Swap(reselected)
+        );
+        // startup None + re-select Some → Swap (the None-resolver
+        // startup worker is upgraded to a real one).
+        assert_eq!(
+            resolver_scope_decision(None, Some(selected)),
+            ResolverScopeDecision::Swap(reselected)
+        );
+        // startup Some + re-select NoResolver → Drop (hostnames
+        // honestly `Unavailable (no local resolver)`).
+        assert_eq!(
+            resolver_scope_decision(Some(startup), Some(ResolverSelection::NoResolver)),
+            ResolverScopeDecision::Drop
+        );
+        // startup None + re-select NoResolver → Keep (stay None — a
+        // no-op, not an error).
+        assert_eq!(
+            resolver_scope_decision(None, Some(ResolverSelection::NoResolver)),
+            ResolverScopeDecision::Keep
+        );
+        // The degenerate (None, None) row — unreachable from the
+        // wiring (a None startup address is inside no scope, so the
+        // wiring always re-reads) — stays total: Keep.
+        assert_eq!(
+            resolver_scope_decision(None, None),
+            ResolverScopeDecision::Keep
+        );
+    }
+
+    #[test]
+    fn fu1_the_keep_row_provably_re_reads_nothing() {
+        // AC-2's shape proof: the decision function takes the
+        // re-selection as an *input* and contains no I/O at all, so
+        // the in-scope Keep row cannot have consulted
+        // `select_from_system` — the caller that found the startup
+        // resolver inside the confirmed scope (a pure `Ipv4Net::
+        // contains` check in the wiring) passes `None` and nothing
+        // else. Pinned here as the documented contract of the None
+        // input; the wiring-level no-op is proven by the runtime
+        // swap-counter and pty evidence tests.
+        let startup = "192.0.2.6:53".parse::<SocketAddr>().expect("valid");
+        let scope = crate::model::Ipv4Net::new(Ipv4Addr::new(192, 0, 2, 0), 29).expect("valid");
+        assert!(scope.contains(Ipv4Addr::new(192, 0, 2, 6)));
+        // The wiring's exact containment recipe for the in-scope row
+        // (an IPv6 resolver address is inside no IPv4 scope): no
+        // re-selection value is ever computed.
+        let inside =
+            matches!(startup.ip(), std::net::IpAddr::V4(address) if scope.contains(address));
+        let reselection = if inside {
+            None
+        } else {
+            Some(ResolverSelection::NoResolver)
+        };
+        assert_eq!(reselection, None);
+        assert_eq!(
+            resolver_scope_decision(Some(startup), reselection),
+            ResolverScopeDecision::Keep
+        );
     }
 
     /// A synthetic eligible interface: `eth9`, index 2, MAC

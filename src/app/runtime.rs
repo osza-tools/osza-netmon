@@ -309,6 +309,30 @@ pub struct Runtime<E: EffectsExecutor> {
     /// poll stays suppressed while the construction-time worker is a
     /// placeholder, so the first Initial scan can never run on it).
     discovery_attached: bool,
+    /// T-302-FU1's deferred-hostname-effects gate: while the runtime
+    /// is detached (the [`new_detached`](Self::new_detached)
+    /// construction), [`Effect::ResolveHostname`] effects are held
+    /// here, not executed — the confirm-time own-address lookup must
+    /// reach the **post-swap** executor, never the startup worker
+    /// (R-3; the startup resolver was selected over the *suggested*
+    /// scope and may lie outside the confirmed subnet). Pre-attach at
+    /// most one can exist — nothing but the confirm-time own-address
+    /// lookup observes before the first cycle, and the placeholder
+    /// worker never runs one (the suppressed poll); the invariant is
+    /// asserted by the T-302-FU1 tests.
+    /// [`attach_hostname`](Self::attach_hostname) releases the held
+    /// effects. [`Runtime::new`] (attached, all T-205 tests) is
+    /// open-by-default and unchanged: the vec stays empty.
+    deferred_hostname: Vec<Effect>,
+    /// Whether the hostname gate is open: `true` after
+    /// [`Runtime::new`]; `false` after
+    /// [`Runtime::new_detached`](Self::new_detached) until
+    /// [`attach_hostname`](Self::attach_hostname) — distinct from
+    /// `discovery_attached` because the wiring attaches the
+    /// discovery worker *before* applying the resolver-scope
+    /// decision, and the deferred lookups must not run between the
+    /// two.
+    hostname_attached: bool,
     /// Set when the queue's last sender is gone (documented in
     /// `run_until_quit`).
     queue_disconnected: bool,
@@ -383,6 +407,8 @@ impl<E: EffectsExecutor> Runtime<E> {
             forwarder_thread,
             forwarder_drops_base: 0,
             discovery_attached,
+            deferred_hostname: Vec::new(),
+            hostname_attached: discovery_attached,
             queue_disconnected: false,
             shut_down: false,
         };
@@ -539,6 +565,15 @@ impl<E: EffectsExecutor> Runtime<E> {
     /// restart is the remedy; the message says so via T-401's
     /// wording).
     fn execute_effect(&mut self, effect: Effect) {
+        // T-302-FU1's deferred-hostname-effects gate: while the
+        // runtime is detached, a ResolveHostname effect is held, not
+        // executed — the hostname attach releases it to the
+        // post-swap executor (see the field's documentation for the
+        // at-most-one invariant).
+        if matches!(effect, Effect::ResolveHostname { .. }) && !self.hostname_attached {
+            self.deferred_hostname.push(effect);
+            return;
+        }
         match self.executor.execute(effect) {
             Ok(()) => {}
             Err(EffectError::StartScan(error)) => {
@@ -629,6 +664,53 @@ impl<E: EffectsExecutor> Runtime<E> {
         Ok(())
     }
 
+    /// Applies the confirm-time resolver-scope decision (task
+    /// T-302-FU1 — the PQ-2 ruling of plan v1.13.0: after the scope
+    /// confirmation every PTR query must go to a resolver inside the
+    /// confirmed subnet, or to no resolver at all):
+    ///
+    /// 1. when `replacement` is `Some`, the executor's hostname swap
+    ///    retires the startup worker (its stop flag interrupts its
+    ///    resolver's pending socket wait; the join is bounded by the
+    ///    T-203 bound the shutdown sequence uses) and installs the
+    ///    wiring-built replacement — a `None` replacement is the
+    ///    decision's Keep: the executor is **not** called, so the
+    ///    swap counter proves the no-op (AC-3);
+    /// 2. the state's `resolver_selected` truth is re-recorded —
+    ///    `Some` only for a resolver inside the confirmed scope (F-3);
+    /// 3. the deferred-hostname gate opens and the held effects (at
+    ///    most one — the confirm-time own-address lookup) execute
+    ///    against the **post-swap** executor (R-3: the own-address
+    ///    lookup provably follows the swap; with a Drop it provably
+    ///    produces no datagram).
+    ///
+    /// Called by the wiring exactly once per session, at the same
+    /// loop point that attaches the confirmed discovery worker (one
+    /// decision per session — MVP scope; refresh cycles and interface
+    /// changes after the confirmation re-select nothing).
+    ///
+    /// # Errors
+    /// The executor's typed rejection ([`EffectError`]), verbatim.
+    pub fn attach_hostname(
+        &mut self,
+        replacement: Option<crate::enrichment::worker::HostnameWorker>,
+        effective_resolver: Option<std::net::SocketAddr>,
+    ) -> Result<(), EffectError> {
+        // 1. The executor's swap (only when there is one to make).
+        if let Some(worker) = replacement {
+            self.executor.attach_hostname(worker)?;
+        }
+        // 2. The state's truth (F-3).
+        self.state.resolver_selected = effective_resolver;
+        // 3. The gate opens; the held effects execute against the
+        //    post-swap executor.
+        self.hostname_attached = true;
+        for effect in std::mem::take(&mut self.deferred_hostname) {
+            self.execute_effect(effect);
+        }
+        Ok(())
+    }
+
     /// A clone of the bounded queue's sending end for a fresh
     /// forwarder: the receiver stays owned by `self.events`, and the
     /// spare clone opens the **same** channel to the new thread
@@ -686,6 +768,10 @@ pub struct RecordingExecutor {
     /// E-2c ordering evidence: the first `StartScan` must come after
     /// this count reaches 1).
     attaches: AtomicU64,
+    /// How many hostname-worker swaps were requested (task T-302-FU1:
+    /// the Keep decision's no-op proof — the count must stay 0 when
+    /// the startup resolver lies inside the confirmed scope).
+    hostname_attaches: AtomicU64,
 }
 
 impl RecordingExecutor {
@@ -700,6 +786,7 @@ impl RecordingExecutor {
             recorded: Mutex::new(Vec::new()),
             fail_starts: Some(error),
             attaches: AtomicU64::new(0),
+            hostname_attaches: AtomicU64::new(0),
         }
     }
 
@@ -723,6 +810,12 @@ impl RecordingExecutor {
     pub fn attach_count(&self) -> u64 {
         self.attaches.load(Ordering::Relaxed)
     }
+
+    /// How many hostname-worker swaps were requested (T-302-FU1's
+    /// Keep no-op proof: 0 when no swap was asked for).
+    pub fn hostname_attach_count(&self) -> u64 {
+        self.hostname_attaches.load(Ordering::Relaxed)
+    }
 }
 
 impl EffectsExecutor for RecordingExecutor {
@@ -745,6 +838,20 @@ impl EffectsExecutor for RecordingExecutor {
         // default policy — this executor owns no worker to swap, so
         // the stray handle is shut down, never leaked.
         self.attaches.fetch_add(1, Ordering::Relaxed);
+        worker.shutdown();
+        Ok(())
+    }
+
+    fn attach_hostname(
+        &mut self,
+        mut worker: crate::enrichment::worker::HostnameWorker,
+    ) -> Result<(), EffectError> {
+        // T-302-FU1: count the swap (the Keep path's no-op evidence —
+        // the count stays 0 when `Runtime::attach_hostname` is called
+        // with a `None` replacement), then the default policy: this
+        // executor owns no hostname worker to swap, so the stray
+        // handle is shut down, never leaked.
+        self.hostname_attaches.fetch_add(1, Ordering::Relaxed);
         worker.shutdown();
         Ok(())
     }
@@ -1676,6 +1783,465 @@ mod tests {
                 .any(|device| device.has_ip(Ipv4Addr::new(192, 0, 2, 9))),
             "the placeholder's stream is retired"
         );
+        send(&sender, AppEvent::Input(InputEvent::Key(Key::Char('q'))));
+        runtime.step(Duration::ZERO);
+        drop(runtime);
+    }
+
+    // ---- task T-302-FU1: the confirm-time resolver re-selection ----
+
+    /// A second synthetic eligible interface (the non-suggested row of
+    /// the two-interface shape): `wlan9`, index 3, 198.51.100.129/25
+    /// (RFC 5737), MAC `aa:bb:cc:dd:ee:02`.
+    fn wlan9_entry() -> ScopeEntry {
+        ScopeEntry {
+            name: "wlan9".to_owned(),
+            index: 3,
+            mac: Some("aa:bb:cc:dd:ee:02".parse().expect("valid MAC")),
+            ipv4: Some((Ipv4Addr::new(198, 51, 100, 129), 25)),
+            is_up: true,
+            is_running: true,
+            is_loopback: false,
+            link_type: LinkType::Ethernet,
+            class: InterfaceClass::Physical,
+            eligibility: Eligibility::Eligible,
+            default_gateway: None,
+        }
+    }
+
+    /// A recording fake resolver (the T-302-FU1 ordering evidence):
+    /// every served query is recorded, then answered with one fixed
+    /// name. The trait is implemented in test code only (the §2
+    /// ruling; fully qualified to keep the §8.2 import grep honest).
+    struct RecordingResolver {
+        queries: Arc<StdMutex<Vec<Ipv4Addr>>>,
+        name: &'static str,
+    }
+
+    impl crate::enrichment::dns::NameResolver for RecordingResolver {
+        fn reverse(
+            &mut self,
+            ip: Ipv4Addr,
+            _timeout: Duration,
+        ) -> Result<Option<Hostname>, crate::enrichment::dns::ResolveError> {
+            self.queries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(ip);
+            Ok(Some(Hostname::try_from(self.name).expect("valid name")))
+        }
+    }
+
+    /// Spawns one hostname worker over a recording resolver (the fake
+    /// spawner of the runtime-level swap tests).
+    fn recording_worker(
+        queries: &Arc<StdMutex<Vec<Ipv4Addr>>>,
+        name: &'static str,
+        clock: &Arc<dyn Clock + Send + Sync>,
+    ) -> HostnameWorker {
+        HostnameWorker::spawn(
+            Default::default(),
+            Some(Box::new(RecordingResolver {
+                queries: Arc::clone(queries),
+                name,
+            })),
+            Arc::clone(clock),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("spawn succeeds")
+    }
+
+    /// Confirms the non-suggested `wlan9` through the real queue (the
+    /// notice, `j` to the second row, then the FR-SC-07 typed `yes` —
+    /// the fixture's range is public and the session is active).
+    fn confirm_wlan9(runtime: &mut Runtime<impl EffectsExecutor>, sender: &AppEventSender) {
+        send(sender, AppEvent::Input(InputEvent::Key(Key::Char('y'))));
+        send(sender, AppEvent::Input(InputEvent::Key(Key::Char('j'))));
+        send(sender, AppEvent::Input(InputEvent::Key(Key::Enter)));
+        for letter in ['y', 'e', 's'] {
+            send(sender, AppEvent::Input(InputEvent::Key(Key::Char(letter))));
+        }
+        send(sender, AppEvent::Input(InputEvent::Key(Key::Enter)));
+        runtime.step(Duration::ZERO);
+    }
+
+    #[test]
+    fn fu1_a_non_suggested_confirmation_swaps_and_the_own_lookup_follows_the_swap() {
+        // AC-3 (the swap) + AC-4 (the ordering proof, R-3): the
+        // startup resolver (192.0.2.6, selected over the *suggested*
+        // eth9's 192.0.2.0/29) lies outside the confirmed wlan9 scope
+        // (198.51.100.128/25); the wiring's recipe — the pure
+        // containment check, then the re-selection, then the pure
+        // decision — yields Swap(198.51.100.200:53). The deferred
+        // own-address lookup executes against the *post-swap*
+        // resolver, and the retired resolver serves zero queries after
+        // the confirming keypress (indeed zero ever).
+        let clock: Arc<dyn Clock + Send + Sync> =
+            Arc::new(SharedFakeClock(Arc::new(StdMutex::new(FakeClock::new()))));
+        let startup = "192.0.2.6:53"
+            .parse::<std::net::SocketAddr>()
+            .expect("valid");
+        let params = SessionParams {
+            resolver_selected: Some(startup),
+            ..SessionParams::default()
+        };
+        let state = AppState::with_scope_entries(
+            params,
+            vec![eth_entry(), wlan9_entry()],
+            db(),
+            clock.as_ref(),
+        )
+        .expect("valid");
+        // The startup hostname worker over the recording resolver A.
+        let queries_a = Arc::new(StdMutex::new(Vec::new()));
+        let hostname = recording_worker(&queries_a, "startup.lan", &clock);
+        let (placeholder, placeholder_events) = DiscoveryWorker::spawn_read_only(
+            Box::new(FakeNeighbors::with_host(5)),
+            crate::model::Ipv4Net::new(Ipv4Addr::new(192, 0, 2, 0), 29).expect("scope"),
+            String::new(), // the placeholder's filter matches nothing
+        );
+        let executor = WorkerExecutor::new(placeholder, hostname);
+        let (mut runtime, sender) =
+            Runtime::new_detached(state, executor, placeholder_events, Arc::clone(&clock));
+        // Confirm wlan9 through the real queue.
+        confirm_wlan9(&mut runtime, &sender);
+        assert_eq!(
+            runtime.state().confirmed_scope().map(|scope| scope.scope),
+            {
+                Some(
+                    crate::model::Ipv4Net::new(Ipv4Addr::new(198, 51, 100, 128), 25)
+                        .expect("scope"),
+                )
+            }
+        );
+        // The deferred-hostname gate held exactly the confirm-time
+        // own-address lookup — the at-most-one invariant — and the
+        // startup resolver has served nothing.
+        assert_eq!(
+            runtime.deferred_hostname,
+            vec![Effect::ResolveHostname {
+                ip: Ipv4Addr::new(198, 51, 100, 129)
+            }],
+            "exactly one held effect: the confirm-time own-address lookup"
+        );
+        assert!(
+            queries_a
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
+        // The wiring's recipe, verbatim: the pure containment check
+        // first (an IPv6 resolver address is inside no IPv4 scope),
+        // then the re-selection over the confirmed scope, then the
+        // pure decision.
+        let confirmed_scope =
+            crate::model::Ipv4Net::new(Ipv4Addr::new(198, 51, 100, 128), 25).expect("scope");
+        let inside = matches!(startup.ip(), std::net::IpAddr::V4(address) if confirmed_scope.contains(address));
+        assert!(!inside, "the startup resolver lies outside wlan9's scope");
+        let reselection = if inside {
+            None
+        } else {
+            Some(crate::enrichment::hostname::ResolverSelection::Selected {
+                address: Ipv4Addr::new(198, 51, 100, 200),
+                via_systemd_fallback: false,
+            })
+        };
+        let decision = crate::app::resolver_scope_decision(Some(startup), reselection);
+        assert_eq!(
+            decision,
+            crate::app::ResolverScopeDecision::Swap(
+                "198.51.100.200:53"
+                    .parse::<std::net::SocketAddr>()
+                    .expect("valid")
+            )
+        );
+        // The attach order, verbatim: the confirmed interface's
+        // discovery worker first (an empty-table read-only one — no
+        // observation lookups to noise the evidence), then the
+        // hostname swap.
+        let (worker, events) = DiscoveryWorker::spawn_read_only(
+            Box::new(FakeNeighbors {
+                table: String::new(),
+            }),
+            confirmed_scope,
+            "wlan9".to_owned(),
+        );
+        runtime
+            .attach_discovery(worker, events)
+            .expect("the attach");
+        // The replacement: a fresh stop flag and the swapped
+        // resolver's recording worker (the fake spawner).
+        let queries_b = Arc::new(StdMutex::new(Vec::new()));
+        let replacement = recording_worker(&queries_b, "swapped.lan", &clock);
+        runtime
+            .attach_hostname(
+                Some(replacement),
+                Some(
+                    "198.51.100.200:53"
+                        .parse::<std::net::SocketAddr>()
+                        .expect("valid"),
+                ),
+            )
+            .expect("the hostname attach");
+        // AC-4: the confirm-time own-address lookup executes against
+        // the post-swap resolver (bounded poll through the real loop;
+        // the hostname event flows through the swapped stream).
+        let own_key = DeviceKey {
+            iface_index: 3,
+            mac: "aa:bb:cc:dd:ee:02".parse().expect("valid MAC"),
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            runtime.step(Duration::from_millis(20));
+            let hostname_known = runtime
+                .state()
+                .registry
+                .get(&own_key)
+                .is_some_and(|device| device.hostname.is_known());
+            if hostname_known {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the own-address lookup must flow through the swapped stream within the bound"
+            );
+        }
+        let served_b = queries_b
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(
+            served_b,
+            vec![Ipv4Addr::new(198, 51, 100, 129)],
+            "exactly the own-address lookup, served by the swapped resolver"
+        );
+        assert!(
+            queries_a
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "zero queries by the retired resolver after the confirming keypress"
+        );
+        // The hostname event flowed through the swapped stream: the
+        // own device's field carries the replacement's answer.
+        let own = runtime.state().registry.get(&own_key).expect("the device");
+        assert_eq!(
+            own.hostname,
+            Field::Known {
+                value: Hostname::try_from("swapped.lan").expect("valid"),
+                source: Source::ReverseDns,
+            }
+        );
+        // F-3: the state's truth is the in-scope (swapped) resolver.
+        assert_eq!(
+            runtime.state().resolver_selected,
+            Some(
+                "198.51.100.200:53"
+                    .parse::<std::net::SocketAddr>()
+                    .expect("valid")
+            )
+        );
+        send(&sender, AppEvent::Input(InputEvent::Key(Key::Char('q'))));
+        runtime.step(Duration::ZERO);
+        drop(runtime);
+    }
+
+    #[test]
+    fn fu1_a_suggested_confirmation_swaps_nothing() {
+        // AC-3's no-op half: the startup resolver (192.0.2.6) lies
+        // inside the suggested eth9's confirmed scope, the decision is
+        // Keep, and the swap counter proves the executor was never
+        // asked — while the deferred own-address lookup is still
+        // released (over the kept worker).
+        let clock: Arc<dyn Clock + Send + Sync> =
+            Arc::new(SharedFakeClock(Arc::new(StdMutex::new(FakeClock::new()))));
+        let startup = "192.0.2.6:53"
+            .parse::<std::net::SocketAddr>()
+            .expect("valid");
+        let params = SessionParams {
+            resolver_selected: Some(startup),
+            ..SessionParams::default()
+        };
+        let state = AppState::with_scope_entries(params, vec![eth_entry()], db(), clock.as_ref())
+            .expect("valid");
+        let (mut runtime, sender) = Runtime::new_detached(
+            state,
+            RecordingExecutor::new(),
+            dummy_discovery_receiver(),
+            Arc::clone(&clock),
+        );
+        // Confirm the suggested eth9 (public range: typed yes).
+        send(&sender, AppEvent::Input(InputEvent::Key(Key::Char('y'))));
+        send(&sender, AppEvent::Input(InputEvent::Key(Key::Enter)));
+        for letter in ['y', 'e', 's'] {
+            send(&sender, AppEvent::Input(InputEvent::Key(Key::Char(letter))));
+        }
+        send(&sender, AppEvent::Input(InputEvent::Key(Key::Enter)));
+        runtime.step(Duration::ZERO);
+        assert!(runtime.state().discovery_armed());
+        // The wiring's recipe for the in-scope row: the containment
+        // check passes, so no re-selection value is computed at all,
+        // and the decision is Keep.
+        let confirmed_scope =
+            crate::model::Ipv4Net::new(Ipv4Addr::new(192, 0, 2, 0), 29).expect("scope");
+        let inside = matches!(startup.ip(), std::net::IpAddr::V4(address) if confirmed_scope.contains(address));
+        assert!(
+            inside,
+            "the startup resolver lies inside the suggested scope"
+        );
+        // The wiring passes no re-selection value on this arm — the
+        // decision function's pure shape does the rest.
+        let reselection: Option<crate::enrichment::hostname::ResolverSelection> = None;
+        assert_eq!(
+            crate::app::resolver_scope_decision(Some(startup), reselection),
+            crate::app::ResolverScopeDecision::Keep
+        );
+        // The discovery attach (E-2c) then the Keep attach: no worker
+        // to swap, the gate releases over the kept worker.
+        let (worker, events) = DiscoveryWorker::spawn_read_only(
+            Box::new(FakeNeighbors {
+                table: String::new(),
+            }),
+            confirmed_scope,
+            "eth9".to_owned(),
+        );
+        runtime
+            .attach_discovery(worker, events)
+            .expect("the attach");
+        runtime
+            .attach_hostname(None, Some(startup))
+            .expect("the keep attach");
+        // The no-op proof: the discovery attach happened, the hostname
+        // swap counter never moved.
+        assert_eq!(runtime.executor.attach_count(), 1);
+        assert_eq!(
+            runtime.executor.hostname_attach_count(),
+            0,
+            "Keep asks the executor for no hostname swap"
+        );
+        // The deferred own-address lookup was released all the same
+        // (over the kept worker — here the recording executor).
+        assert!(runtime.executor.recorded().iter().any(|effect| *effect
+            == Effect::ResolveHostname {
+                ip: Ipv4Addr::new(192, 0, 2, 1)
+            }));
+        // F-3: the startup selection stays the truth.
+        assert_eq!(runtime.state().resolver_selected, Some(startup));
+        drop(runtime);
+    }
+
+    #[test]
+    fn fu1_the_drop_case_installs_a_none_resolver_worker_and_no_datagram_is_ever_sent() {
+        // AC-4's Drop half (R-3): the confirmed scope re-selects
+        // `NoResolver` — the replacement is a `None`-resolver worker,
+        // zero queries are ever sent (neither by the retired resolver
+        // nor by any socket), and the own device's hostname field is
+        // honestly `Unavailable (no local resolver)` (ADR-003 item 3)
+        // — no silent retry loop.
+        let clock: Arc<dyn Clock + Send + Sync> =
+            Arc::new(SharedFakeClock(Arc::new(StdMutex::new(FakeClock::new()))));
+        let startup = "192.0.2.6:53"
+            .parse::<std::net::SocketAddr>()
+            .expect("valid");
+        let params = SessionParams {
+            resolver_selected: Some(startup),
+            ..SessionParams::default()
+        };
+        let state = AppState::with_scope_entries(
+            params,
+            vec![eth_entry(), wlan9_entry()],
+            db(),
+            clock.as_ref(),
+        )
+        .expect("valid");
+        let queries_a = Arc::new(StdMutex::new(Vec::new()));
+        let hostname = recording_worker(&queries_a, "startup.lan", &clock);
+        let (placeholder, placeholder_events) = DiscoveryWorker::spawn_read_only(
+            Box::new(FakeNeighbors::with_host(5)),
+            crate::model::Ipv4Net::new(Ipv4Addr::new(192, 0, 2, 0), 29).expect("scope"),
+            String::new(),
+        );
+        let executor = WorkerExecutor::new(placeholder, hostname);
+        let (mut runtime, sender) =
+            Runtime::new_detached(state, executor, placeholder_events, Arc::clone(&clock));
+        confirm_wlan9(&mut runtime, &sender);
+        assert_eq!(runtime.deferred_hostname.len(), 1);
+        // The wiring's recipe: the startup resolver is outside the
+        // confirmed scope, the re-selection over it finds no resolver.
+        let confirmed_scope =
+            crate::model::Ipv4Net::new(Ipv4Addr::new(198, 51, 100, 128), 25).expect("scope");
+        let inside = matches!(startup.ip(), std::net::IpAddr::V4(address) if confirmed_scope.contains(address));
+        assert!(!inside);
+        let reselection = if inside {
+            None
+        } else {
+            Some(crate::enrichment::hostname::ResolverSelection::NoResolver)
+        };
+        assert_eq!(
+            crate::app::resolver_scope_decision(Some(startup), reselection),
+            crate::app::ResolverScopeDecision::Drop
+        );
+        let (worker, events) = DiscoveryWorker::spawn_read_only(
+            Box::new(FakeNeighbors {
+                table: String::new(),
+            }),
+            confirmed_scope,
+            "wlan9".to_owned(),
+        );
+        runtime
+            .attach_discovery(worker, events)
+            .expect("the attach");
+        // The Drop replacement: a `None`-resolver worker (a fresh stop
+        // flag; no socket exists at all).
+        let replacement = HostnameWorker::spawn(
+            Default::default(),
+            None,
+            Arc::clone(&clock),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("spawn succeeds");
+        runtime
+            .attach_hostname(Some(replacement), None)
+            .expect("the drop attach");
+        // Bounded poll: the own device's hostname field becomes the
+        // honest Unavailable answer (the event flows through the
+        // swapped stream).
+        let own_key = DeviceKey {
+            iface_index: 3,
+            mac: "aa:bb:cc:dd:ee:02".parse().expect("valid MAC"),
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            runtime.step(Duration::from_millis(20));
+            let unavailable = runtime
+                .state()
+                .registry
+                .get(&own_key)
+                .is_some_and(|device| {
+                    matches!(
+                        device.hostname,
+                        Field::Unavailable(crate::model::Reason::NoResolver)
+                    )
+                });
+            if unavailable {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the honest Unavailable answer must flow within the bound"
+            );
+        }
+        // Zero queries ever: the retired resolver served nothing (and
+        // the replacement has no resolver to query with).
+        assert!(
+            queries_a
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "zero queries ever — no datagram left the host on either resolver's behalf"
+        );
+        // F-3: the state's truth is honestly none.
+        assert_eq!(runtime.state().resolver_selected, None);
         send(&sender, AppEvent::Input(InputEvent::Key(Key::Char('q'))));
         runtime.step(Duration::ZERO);
         drop(runtime);

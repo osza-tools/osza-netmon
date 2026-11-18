@@ -69,5 +69,6 @@ pub use state::{
 };
 pub use update::update;
 pub use update::{
-    estimate_duration, initial_request_count, is_local_use_network, probe_target_count,
+    ResolverScopeDecision, estimate_duration, initial_request_count, is_local_use_network,
+    probe_target_count, resolver_scope_decision,
 };

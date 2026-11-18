@@ -70,6 +70,13 @@
 //!     confirmed — ARP egress lands **only** on the confirmed
 //!     subnet's wire, zero egress pre-confirm, and `CapEff`/`CapPrm`
 //!     zero while the TUI runs (SR-06).
+//! 15. `flow_resolver_scope_swap` — the T-302-FU1 wiring acceptance
+//!     (AC-5, the R-5 seam): the fake session's injected
+//!     resolver-decision inputs drive the real loop's attach — a
+//!     non-suggested confirmation **Drops** (the retired resolver
+//!     serves zero queries), a suggested confirmation **Keeps** (the
+//!     confirm-time own-address lookup is served first by the kept
+//!     resolver) — asserted through the served-query evidence.
 
 mod drive;
 mod fakes;
@@ -126,7 +133,7 @@ fn main() -> ExitCode {
     /// One scenario: a name and its zero-argument runner.
     type Scenario = (&'static str, fn() -> Result<(), String>);
 
-    let scenarios: [Scenario; 14] = [
+    let scenarios: [Scenario; 15] = [
         ("restore_normal_q", restore_normal_q),
         ("restore_error_exit", restore_error_exit),
         ("restore_panic", restore_panic),
@@ -141,6 +148,7 @@ fn main() -> ExitCode {
         ("flow_ack_reask", flow_ack_reask),
         ("flow_ack_write_failure", flow_ack_write_failure),
         ("netns_two_interface_egress", netns_two_interface_egress),
+        ("flow_resolver_scope_swap", flow_resolver_scope_swap),
     ];
 
     let started = Instant::now();
@@ -754,6 +762,111 @@ fn flow_ack_write_failure() -> Result<(), String> {
     );
     session.send(b"q");
     assert_restored(&mut session, 0)
+}
+
+// ---------------------------------------------------------------------------
+// The T-302-FU1 resolver-scope flows (AC-5; the R-5 injected inputs)
+// ---------------------------------------------------------------------------
+
+/// The served-query evidence of one armed fake session (one
+/// `query=<ip>` line per query the startup resolver served, in
+/// order — written after the session ends, under the isolated
+/// config directory).
+fn resolver_evidence(config: &std::path::Path) -> Result<Vec<String>, String> {
+    let path = config.join("osza-netmon").join("resolver-evidence");
+    let content = std::fs::read_to_string(&path)
+        .map_err(|error| format!("the resolver evidence was not written: {error}"))?;
+    Ok(content
+        .lines()
+        .filter_map(|line| line.strip_prefix("query=").map(str::to_owned))
+        .collect())
+}
+
+/// One armed fake session (the `OSZA_PTY_RESOLVER_SEAM` knob rides
+/// the environment through `script(1)`, exactly like the ack flows'
+/// `XDG_CONFIG_HOME`).
+fn armed_fake_session(phase: &str, config: &std::path::Path) -> PtySession {
+    let command = format!(
+        "OSZA_PTY_RESOLVER_SEAM={phase} {xdg}{self} --fake-session",
+        xdg = xdg_prefix(config),
+        self = SELF_EXE.get().expect("set in main")
+    );
+    let session = PtySession::spawn(phase, &command, 4);
+    assert_or(
+        session.wait_for(b"Authorization", Duration::from_secs(30)),
+        "the armed session never showed the notice",
+    );
+    session
+}
+
+fn flow_resolver_scope_swap() -> Result<(), String> {
+    // Phase A — Drop (the non-suggested confirmation): the injected
+    // inputs are a startup resolver inside the *suggested* eth9's
+    // 192.0.2.0/29 (192.0.2.6) and a re-selection answer of
+    // `NoResolver`. Confirming the NON-suggested wlan9
+    // (198.51.100.128/25) must **Drop**: the hostname worker is
+    // swapped to a `None`-resolver one and the confirm-time
+    // own-address lookup produces NO query on the retired resolver —
+    // the wiring-level R-3 proof (the pre-fix behavior leaked the
+    // own-address lookup onto the startup worker; the exact device
+    // count backstops the PQ-3 attach as in flow_first_run_ack).
+    let drop_config = isolated_config("resolver-drop");
+    let mut session = armed_fake_session("drop", &drop_config);
+    session.send(b"y");
+    assert_or(
+        session.wait_for(b"Choose", Duration::from_secs(20)),
+        "y never acknowledged the notice (drop phase)",
+    );
+    session.send(b"j");
+    drive_confirm_selected(&mut session)?;
+    assert_or(
+        wait_for_device_count(&session, "2", Duration::from_secs(30)),
+        "the confirmed interface's exact device count never appeared (drop phase)",
+    );
+    session.send(b"q");
+    assert_restored(&mut session, 0)?;
+    let evidence = resolver_evidence(&drop_config)?;
+    if !evidence.is_empty() {
+        return Err(format!(
+            "the retired resolver served queries on the non-suggested confirmation: \
+             {evidence:?} (R-3 violated — the swap did not gate the lookup)"
+        ));
+    }
+
+    // Phase B — Keep (the suggested confirmation): the same startup
+    // resolver, confirmed *inside* its scope (eth9), with the same
+    // adversarial re-selection answer (`NoResolver` — a bug that
+    // re-reads on the in-scope path would Drop and serve nothing).
+    // The decision must be **Keep**: the confirm-time own-address
+    // lookup (192.0.2.1) is released at the attach and served FIRST
+    // by the kept resolver (eth9's own device + its three fake
+    // neighbors = the exact count backstop).
+    let keep_config = isolated_config("resolver-keep");
+    let mut session = armed_fake_session("keep", &keep_config);
+    session.send(b"y");
+    assert_or(
+        session.wait_for(b"Choose", Duration::from_secs(20)),
+        "y never acknowledged the notice (keep phase)",
+    );
+    drive_confirm_selected(&mut session)?;
+    assert_or(
+        wait_for_device_count(&session, "4", Duration::from_secs(30)),
+        "the suggested interface's exact device count never appeared (keep phase)",
+    );
+    session.send(b"q");
+    assert_restored(&mut session, 0)?;
+    let evidence = resolver_evidence(&keep_config)?;
+    let first = evidence.first().ok_or(
+        "the kept resolver served nothing — the deferred own-address lookup \
+         was never released at the attach",
+    )?;
+    if first != "192.0.2.1" {
+        return Err(format!(
+            "the first served query was {first}, expected the confirm-time \
+             own-address lookup 192.0.2.1 (the release must precede the scan)"
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
