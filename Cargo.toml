@@ -47,7 +47,7 @@ thiserror = "2"
 # report. T-104 (PQ-1 of its report) additionally enables "process" for
 # nix::sys::prctl::set_no_new_privs (ADR-005 step 3) — same crate, same
 # pinned version, no new transitive dependency.
-nix = { version = "=0.31.3", default-features = false, features = ["net", "process"] }
+nix = { version = "=0.32.0", default-features = false, features = ["net", "process"] }
 # Production ArpTransport (task T-104): opens and binds the AF_PACKET
 # socket (the only candidate of §9.1's transport list whose bind/send/recv
 # path needs no `unsafe` of our own — nix and socket2 expose no safe
